@@ -1,0 +1,19 @@
+speech.wav is built from these MSWC clips (Multilingual Spoken Words Corpus, CC-BY 4.0,
+https://mlcommons.org/datasets/multilingual-spoken-words/), rescaled, with gaps and a
+-60 dBFS noise floor added. noise.wav is synthetic.
+
+fr/aaron_common_voice_fr_19047118.wav
+fr/abad_common_voice_fr_17312352.wav
+fr/abaissé_common_voice_fr_18720582.wav
+fr/abandon_common_voice_fr_19392656.wav
+fr/abandonna_common_voice_fr_19123625.wav
+de/aachen_common_voice_de_17315476.wav
+de/aachener_common_voice_de_19851659.wav
+de/aaiún_common_voice_de_17655146.wav
+de/aal_common_voice_de_18587866.wav
+de/aalborg_common_voice_de_18407193.wav
+es/aang_common_voice_es_19746510.wav
+es/aaron_common_voice_es_19787127.wav
+es/abad_common_voice_es_19654654.wav
+es/abadesa_common_voice_es_18315323.wav
+es/abadía_common_voice_es_19267391.wav

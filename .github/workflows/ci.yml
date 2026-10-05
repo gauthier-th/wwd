@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    name: Python (core + runtime, onnxruntime)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - run: uv sync --extra server --locked # CPU torch is enough for tests
+      - run: uv run ruff check .
+      - run: uv run lint-imports
+      - run: uv run pytest -q
+
+  js:
+    name: JS runtime (onnxruntime-web wasm under Node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r typecheck
+      - run: pnpm --filter @wwd/runtime test
+
+  browsers:
+    name: Browsers (Chromium + Firefox, Worker + AudioWorklet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @wwd/web exec playwright install --with-deps chromium firefox
+      - run: pnpm --filter @wwd/web test:e2e

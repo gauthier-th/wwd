@@ -1,0 +1,48 @@
+{
+  "_comment": "Hand-written cases for the gate and trigger logic (runtime/SPEC.md §3). Both runtimes run these without any model. Expected values are worked out by hand in the comments.",
+  "trigger": [
+    {
+      "name": "2-of-3 with refractory",
+      "_why": "refractory_ms 192 at hop 1536 = 2 ticks. t3: [T,F,T] fires, blocks t4-t5; t6 fires again, blocks t7-t8; t10: [F,T,T] fires.",
+      "config": {"threshold": 0.5, "smoothing_k": 2, "smoothing_n": 3, "refractory_ms": 192},
+      "scores": [0.1, 0.6, 0.2, 0.7, 0.9, 0.8, 0.9, 0.1, 0.1, 0.6, 0.6],
+      "expected": [3, 6, 10]
+    },
+    {
+      "name": "score equal to threshold counts",
+      "config": {"threshold": 0.75, "smoothing_k": 2, "smoothing_n": 2, "refractory_ms": 0},
+      "scores": [0.75, 0.75, 0.7499],
+      "expected": [1]
+    },
+    {
+      "name": "1-of-1 without refractory fires every tick above threshold",
+      "config": {"threshold": 0.5, "smoothing_k": 1, "smoothing_n": 1, "refractory_ms": 0},
+      "scores": [0.9, 0.9, 0.1, 0.9],
+      "expected": [0, 1, 3]
+    },
+    {
+      "name": "refractory rounds up to whole ticks",
+      "_why": "refractory_ms 100 = 1600 samples at 16 kHz -> ceil(1600 / 1536) = 2 ticks, so t1-t2 are blocked.",
+      "config": {"threshold": 0.5, "smoothing_k": 1, "smoothing_n": 1, "refractory_ms": 100},
+      "scores": [0.9, 0.9, 0.9, 0.9],
+      "expected": [0, 3]
+    },
+    {
+      "name": "history keeps counting during refractory",
+      "_why": "Scores during refractory still enter the k-of-n history: t2 is blocked, t3 sees [T,T,F] and fires.",
+      "config": {"threshold": 0.5, "smoothing_k": 2, "smoothing_n": 3, "refractory_ms": 96},
+      "scores": [0.9, 0.9, 0.9, 0.1, 0.1],
+      "expected": [1, 3]
+    }
+  ],
+  "gate": [
+    {
+      "name": "open while a recent frame reached the threshold",
+      "_why": "vad_hangover_ms 128 = 2048 samples = 4 frames; ticks every 3 frames. Tick spans (last 4 frames): t0 0-2, t1 2-5, t2 5-8, t3 8-11, t4 11-14.",
+      "config": {"vad_threshold": 0.5, "vad_hangover_ms": 128},
+      "vad": [0.1, 0.2, 0.1, 0.9, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.5, 0.0, 0.0],
+      "expected_open": [false, true, false, false, true],
+      "expected_vad_max": [0.2, 0.9, 0.1, 0.1, 0.5]
+    }
+  ]
+}

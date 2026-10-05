@@ -1,0 +1,7 @@
+packages:
+  - web
+  - runtime/js
+onlyBuiltDependencies:
+  - esbuild
+ignoredBuiltDependencies:
+  - protobufjs

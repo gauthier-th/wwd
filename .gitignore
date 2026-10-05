@@ -1,0 +1,16 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# JS
+node_modules/
+dist/
+web/test-results/
+web/playwright-report/
+
+# Large local artifacts (see PLAN.md §5)
+data/
+models/

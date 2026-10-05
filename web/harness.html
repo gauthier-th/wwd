@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Runtime harness</title>
+    <style>
+      body { font: 14px/1.4 ui-monospace, monospace; margin: 16px; background: #fff; color: #111; }
+      @media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } }
+      pre { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <h1>Runtime harness</h1>
+    <p><a href="?mode=golden">golden parity</a> · <a href="?mode=mic&amp;seconds=6">microphone pipeline (6 s)</a></p>
+    <pre id="out"></pre>
+    <script type="module" src="/src/harness.ts"></script>
+  </body>
+</html>

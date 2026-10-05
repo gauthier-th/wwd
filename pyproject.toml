@@ -1,0 +1,85 @@
+[project]
+name = "wwd"
+version = "0.0.0"
+description = "Few-shot multilingual wake-word trainer"
+requires-python = ">=3.12,<3.13"
+# Runtime-only deps: enough to run every shipped ONNX artifact (see PLAN.md §3).
+dependencies = [
+    "numpy>=2.1",
+    "onnxruntime==1.30.0",
+]
+
+[project.optional-dependencies]
+# Fine-tuning server: CPU-only torch.
+server = [
+    "torch==2.14.1",
+    "onnx>=1.19",
+    "soundfile>=0.13",
+    "soxr>=0.5",
+]
+# Offline base-model training: CUDA torch.
+training = [
+    "torch==2.14.1",
+    "onnx>=1.19",
+    "soundfile>=0.13",
+    "soxr>=0.5",
+    "silero-vad>=6.2.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4",
+    "import-linter>=2.5",
+    "ruff>=0.13",
+]
+
+[tool.uv]
+package = false
+default-groups = ["dev"]
+conflicts = [[{ extra = "server" }, { extra = "training" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "server" },
+    { index = "pytorch-cu130", extra = "training" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["core/tests", "runtime/tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.importlinter]
+root_packages = ["core", "training", "server", "runtime"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "runtime stays standalone and torch-free"
+type = "forbidden"
+source_modules = ["runtime"]
+forbidden_modules = ["core", "training", "server", "torch"]
+
+[[tool.importlinter.contracts]]
+name = "core does not depend on apps"
+type = "forbidden"
+source_modules = ["core"]
+forbidden_modules = ["training", "server"]
+
+[[tool.importlinter.contracts]]
+name = "server never imports training"
+type = "forbidden"
+source_modules = ["server"]
+forbidden_modules = ["training"]

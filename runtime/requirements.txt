@@ -1,0 +1,4 @@
+# Everything needed to run a wake-word bundle on a Pi or any Python host.
+numpy>=2.1
+onnxruntime==1.30.0
+sounddevice>=0.5  # only for `python -m runtime.listen`
