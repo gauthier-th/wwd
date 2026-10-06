@@ -19,6 +19,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
+from core import encoder as encoder_module
 from core.encoder import Encoder
 from training.data import ClipDataset
 from training.paths import DATA
@@ -98,12 +99,7 @@ def _eer(pos: np.ndarray, neg: np.ndarray) -> float:
 
 
 def load_encoder(checkpoint: str | Path, device: str = "cuda") -> Encoder:
-    from core.encoder import EncoderConfig
-
-    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    encoder = Encoder(EncoderConfig(**ckpt["encoder_config"]))
-    encoder.load_state_dict(ckpt["encoder"])
-    return encoder.to(device).eval()
+    return encoder_module.load_encoder(checkpoint, device)
 
 
 def main(argv: list[str] | None = None) -> None:

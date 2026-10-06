@@ -11,10 +11,23 @@ uv sync --extra training      # CUDA torch (GPU box); use --extra server for CPU
 pnpm install
 ```
 
+## Fine-tuning server
+
+```sh
+uv run --extra server uvicorn server.api:app       # API on :8000 (docs at /docs)
+uv run --extra server python -m server.worker      # fine-tune jobs, one at a time
+```
+
+On the GPU box, `--extra training` runs both too (it carries the API stack).
+
+Base models are read from `models/base/<version>/` (`WWD_MODELS`, `WWD_BASE_VERSION`); the
+database and recordings go to `data/server/` (`WWD_SERVER_DATA`). `scripts/m2_smoke.sh [lang]`
+drives a whole run with curl against a real base model and checks the bundle in both runtimes.
+
 ## Tests
 
 ```sh
-uv run pytest                 # core + Python runtime (golden parity)
+uv run pytest                 # core, server (tiny base model) + Python runtime (golden parity)
 uv run ruff check . && uv run lint-imports
 pnpm --filter @wwd/runtime test        # JS runtime, onnxruntime-web wasm under Node
 pnpm --filter @wwd/web test:e2e        # Chromium + Firefox: Worker + AudioWorklet

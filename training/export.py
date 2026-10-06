@@ -1,6 +1,7 @@
 """Assemble a base-model release from a training checkpoint (PLAN.md §7 step 8).
 
     uv run --extra training python -m training.export models/runs/<run>/best.pt --version v0.1
+    uv run --extra training python -m training.export --version v0.1 --int8-cache-only
 
 Writes models/base/<version>/:
   encoder.pt              encoder config + weights (torch, for fine-tuning)
@@ -8,6 +9,7 @@ Writes models/base/<version>/:
   encoder.int8.onnx       static QDQ int8, frontend kept in float
   neg_bank.npz            augmented embeddings of the 200k bank clips (core.finetune.Bank)
   longform_cache.npz      per-tick embeddings of the calibration streams (core.calibrate)
+  longform_cache.int8.npz the same through encoder.int8.onnx: int8 files get their own threshold
   longform_verify.npz     raw audio of the held-out verification streams
   augment_assets.npz      noise / babble / RIR subsets so the CPU server can augment
   base_model.json         version, sources, file hashes
@@ -18,6 +20,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -31,6 +34,7 @@ from core.calibrate import LongformCache
 from core.encoder import Encoder
 from core.export import export_module, quantize_int8
 from core.finetune import WINDOW, Bank
+from core.verify import parallel, stream_embeddings
 from runtime.spec import FORMAT_VERSION
 from training.augment import build_augmenter, musan_audio, openslr_rirs
 from training.build_bank import BANK, LONGFORM
@@ -111,12 +115,47 @@ def embed_longform(encoder: Encoder) -> tuple[LongformCache, dict[str, np.ndarra
     return cache, verify
 
 
+def int8_cache(out: Path, cache: LongformCache, workers: int = os.cpu_count() or 1) -> LongformCache:
+    """The calibration cache again, through the shipped encoder.int8.onnx on onnxruntime.
+
+    int8 embeddings sit at cosine ~0.98 from fp32, which moves each wake word's scores by a
+    different amount (measured in M2: the same threshold gave one word more false accepts and
+    another less recall), so the int8 file is calibrated on its own (PLAN.md §9.3 step 5)."""
+    streams = pd.read_parquet(LONGFORM / "streams.parquet")
+    ids = [s.id for s in streams.itertuples() if s.split != "verify"]
+    model = (out / "encoder.int8.onnx").read_bytes()
+    embs = parallel(lambda i: stream_embeddings(model, np.load(LONGFORM / "streams" / f"{i}.npy")),
+                    ids, workers)
+    if not np.array_equal(np.cumsum([0] + [len(e) for e in embs]), cache.stream_starts):
+        raise RuntimeError("long-form streams changed since longform_cache.npz was built")
+    emb = np.concatenate(embs)
+    return LongformCache(emb / np.linalg.norm(emb, axis=1, keepdims=True), cache.stream_starts,
+                         cache.occ_words, cache.occ_ticks, cache.hop_samples)
+
+
+def add_int8_cache(out: Path) -> None:
+    """Add longform_cache.int8.npz to an existing release (base models exported before M2)."""
+    started = time.time()
+    int8_cache(out, LongformCache.load(out / "longform_cache.npz")).save(out / "longform_cache.int8.npz")
+    manifest = json.loads((out / "base_model.json").read_text())
+    manifest["files"]["longform_cache.int8.npz"] = sha256(out / "longform_cache.int8.npz")
+    (out / "base_model.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"int8 calibration cache -> {out} ({time.time() - started:.0f}s)")
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    p.add_argument("checkpoint")
+    p.add_argument("checkpoint", nargs="?")
     p.add_argument("--version", required=True)
+    p.add_argument("--int8-cache-only", action="store_true",
+                   help="only add longform_cache.int8.npz to an existing release")
     args = p.parse_args(argv)
     out = MODELS / "base" / args.version
+    if args.int8_cache_only:
+        add_int8_cache(out)
+        return
+    if args.checkpoint is None:
+        p.error("checkpoint is required")
     out.mkdir(parents=True, exist_ok=True)
     started = time.time()
 
@@ -141,6 +180,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"bank embedded ({time.time() - started:.0f}s)")
     cache, verify = embed_longform(encoder)
     cache.save(out / "longform_cache.npz")
+    int8_cache(out, cache).save(out / "longform_cache.int8.npz")
     np.savez(out / "longform_verify.npz", **verify)
     print(f"long-form: {cache.hours:.1f} h calibration, {len(verify)} verification streams "
           f"({time.time() - started:.0f}s)")

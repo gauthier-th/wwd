@@ -93,6 +93,45 @@ def export_module(module: torch.nn.Module, path: str | Path, *, output_name: str
     return model
 
 
+class _ScoredHead(torch.nn.Module):
+    def __init__(self, head: torch.nn.Module) -> None:
+        super().__init__()
+        self.head = head
+
+    def forward(self, embedding: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(self.head(embedding))
+
+
+def compose_head(encoder: str | Path, head: torch.nn.Module, path: str | Path, *,
+                 metadata: dict[str, str]) -> onnx.ModelProto:
+    """encoder file ([N, 24000] -> embedding) + head (embedding -> logit) + Sigmoid -> `score`.
+
+    The encoder graph is reused as validated (fp32 or int8, PLAN.md §9.3 step 6); only the head
+    is exported here, in float32, under a `head/` name prefix.
+    """
+    enc = onnx.load(str(encoder))
+    dim = next(o for o in enc.graph.output if o.name == "embedding")
+    dim = dim.type.tensor_type.shape.dim[1].dim_value
+    buf = io.BytesIO()
+    with torch.no_grad():
+        torch.onnx.export(
+            _ScoredHead(copy.deepcopy(head).eval()), (torch.zeros(1, dim),), buf,
+            dynamo=False, opset_version=OPSET, input_names=["embedding"], output_names=["score"],
+            dynamic_axes={"embedding": {0: "batch"}, "score": {0: "batch"}},
+            do_constant_folding=True,
+        )
+    scored = onnx.compose.add_prefix(onnx.load_from_string(buf.getvalue()), "head/",
+                                     rename_inputs=False, rename_outputs=False)
+    scored.ir_version = enc.ir_version
+    del enc.metadata_props[:]
+    model = onnx.compose.merge_models(enc, scored, io_map=[("embedding", "embedding")],
+                                      outputs=["score"])
+    set_metadata(model, metadata)
+    onnx.save(model, str(path))
+    check_graph(path, outputs=["score"])
+    return model
+
+
 def inline_identity_initializers(model: onnx.ModelProto) -> None:
     """Replace `Identity(initializer)` nodes (a TorchScript-exporter artifact of folded
     BatchNorm biases) by initializers, so the quantizer sees every Conv bias as constant."""

@@ -20,13 +20,12 @@ import torch
 
 from core.augment import AugmentConfig, Augmenter, NoiseBank, RirBank
 from core.calibrate import LongformCache, calibrate, count_triggers, stream_recall
-from core.finetune import WINDOW, Bank, Enrollment, FinetuneConfig, finetune
+from core.finetune import SHIFTS, Bank, Enrollment, FinetuneConfig, finetune, tick_windows
 from runtime.spec import DetectorConfig
 from training.evaluate import HELDOUT, load_encoder
 from training.export import embed_windows, stream_windows
 from training.store import ClipReader
 
-SHIFTS = 6  # consecutive ticks during which a 1 s clip sits fully inside the 1.5 s window
 HOP = 1536
 
 
@@ -62,16 +61,6 @@ def pick_targets(heldout: pd.DataFrame, per_lang: int, enroll: int, min_test: in
 
 def read_clips(reader: ClipReader, frame: pd.DataFrame) -> list[np.ndarray]:
     return [reader.read(r.blob, r.offset, r.length) for r in frame.itertuples()]
-
-
-def shifted_windows(clips: list[np.ndarray]) -> torch.Tensor:
-    out = torch.zeros(len(clips) * SHIFTS, WINDOW)
-    for i, c in enumerate(clips):
-        c = torch.from_numpy(c[:16000])
-        for k in range(SHIFTS):
-            start = WINDOW - len(c) - k * HOP
-            out[i * SHIFTS + k, max(0, start) : max(0, start) + len(c)] = c
-    return out + torch.randn_like(out) * 10 ** (-70 / 20)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -111,7 +100,8 @@ def main(argv: list[str] | None = None) -> None:
         with torch.no_grad():
             s_cache = torch.sigmoid(head(cache_emb)).numpy()
             s_verify = torch.sigmoid(head(torch.from_numpy(v_emb))).numpy()
-            test_emb = embed_windows(encoder, shifted_windows(read_clips(reader, test_df)), None)
+            test_clips = [c[:16000] for c in read_clips(reader, test_df)]
+            test_emb = embed_windows(encoder, tick_windows(test_clips, 1, None), None)
             s_test = torch.sigmoid(head(torch.from_numpy(test_emb))).numpy().reshape(-1, SHIFTS)
         row = {"lang": lang, "word": word, "enroll_speakers": int(enroll_df.speaker.nunique()),
                "test_clips": len(test_df)}

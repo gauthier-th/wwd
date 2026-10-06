@@ -1,7 +1,8 @@
-"""Per-wake-word fine-tuning, quick mode (PLAN.md §9.3): frozen encoder, small MLP head.
+"""Per-wake-word fine-tuning, quick mode (PLAN.md §9.3): frozen encoder, one-layer head.
 
 Shared by the server (M2) and the base-model end-to-end evaluation (training.eval_e2e), so the
-number we evaluate is the number users get.
+number we evaluate is the number users get. Embedding (`embed_enrollment`, the expensive part)
+is separate from head fitting (`fit_head`), so the server's leave-2-out folds embed once.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ from core.encoder import Encoder
 from core.model import Head, PrototypeHead
 
 WINDOW = 24000
+HOP = 1536
+SHIFTS = 6  # consecutive ticks during which a 1 s word sits fully inside the 1.5 s window
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,16 @@ class Enrollment:
 
 
 @dataclass
+class EnrollmentEmbeddings:
+    """Everything quick mode needs from the encoder, per recording where it matters."""
+
+    clean: np.ndarray  # [C, D] each recording centred in the window, unaugmented
+    positives: np.ndarray  # [C, A, D] augmented: random speed, placement, room, noise
+    partial: np.ndarray  # [C, P, D] first or last 40-70% of each recording (negatives)
+    user: np.ndarray  # [U, D] the user's other speech and ambience (negatives)
+
+
+@dataclass
 class FinetuneResult:
     head: torch.nn.Module  # embedding [N, D] -> logit [N]
     prototype: np.ndarray
@@ -118,6 +131,24 @@ def partial_windows(clips: list[np.ndarray], n: int, cfg: FinetuneConfig,
     return torch.stack(out)
 
 
+def tick_windows(clips: list[np.ndarray], copies: int, augmenter: Augmenter | None,
+                 device: str | torch.device = "cpu") -> torch.Tensor:
+    """[C * copies * SHIFTS, WINDOW]: each clip as a short stream, cut into the windows of
+    SHIFTS consecutive ticks, the first ending where the clip ends (as runtime/SPEC.md §3
+    windows a stream). Augmentation applies to the whole stream, so the shifts of one copy
+    share their room and noise."""
+    length = WINDOW + (SHIFTS - 1) * HOP
+    streams = torch.zeros(len(clips) * copies, length)
+    for i, clip in enumerate(clips):
+        c = torch.from_numpy(np.asarray(clip, np.float32)[-WINDOW:])
+        streams[i * copies : (i + 1) * copies, WINDOW - len(c) : WINDOW] = c
+    if augmenter is not None:
+        streams = augmenter(streams.to(device)).cpu()
+    else:
+        streams = streams + torch.randn_like(streams) * 10 ** (-70 / 20)  # no digital silence
+    return streams.unfold(1, WINDOW, HOP).reshape(-1, WINDOW)
+
+
 def sliding_windows(audio: list[np.ndarray], hop_s: float) -> torch.Tensor:
     hop, out = int(hop_s * 16000), []
     for a in audio:
@@ -141,18 +172,18 @@ def embed(encoder: Encoder, windows: torch.Tensor, augmenter: Augmenter | None,
     return torch.cat(out).numpy() if out else np.zeros((0, encoder.config.embedding_dim), np.float32)
 
 
-def select_bank(bank: Bank, prototype: np.ndarray, enrollment: Enrollment, cfg: FinetuneConfig,
-                rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, dict]:
+def select_bank(bank: Bank, prototype: np.ndarray, wake_word: str, language: str,
+                cfg: FinetuneConfig, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, dict]:
     """Bank negatives without the wake word itself; the nearest ones weighted up as hard."""
     emb = bank.embeddings.astype(np.float32)
     sims = emb @ prototype
-    target = normalize_word(enrollment.wake_word)
+    target = normalize_word(wake_word)
     same_word = np.array([normalize_word(w) == target for w in bank.words])
     keep = ~same_word & (sims < cfg.exclude_similarity)
     idx = np.flatnonzero(keep)
     hard = idx[np.argsort(-sims[idx])[: cfg.hard_negatives]]
-    same_lang = idx[bank.langs[idx] == enrollment.language]
-    other_lang = idx[bank.langs[idx] != enrollment.language]
+    same_lang = idx[bank.langs[idx] == language]
+    other_lang = idx[bank.langs[idx] != language]
     n_same = min(len(same_lang), int(cfg.random_negatives * cfg.same_language_share))
     n_other = min(len(other_lang), cfg.random_negatives - n_same)
     rand = np.concatenate([rng.choice(same_lang, n_same, replace=False),
@@ -202,31 +233,51 @@ def prototype_head(proto: np.ndarray, pos: np.ndarray, neg: np.ndarray,
                          -cfg.score_scale * midpoint).eval()
 
 
-def finetune(encoder: Encoder, enrollment: Enrollment, bank: Bank, augmenter: Augmenter,
-             cfg: FinetuneConfig = FinetuneConfig(), device: str | torch.device = "cpu") -> FinetuneResult:  # noqa: B008
+def embed_enrollment(encoder: Encoder, enrollment: Enrollment, augmenter: Augmenter,
+                     cfg: FinetuneConfig = FinetuneConfig(),  # noqa: B008
+                     device: str | torch.device = "cpu") -> EnrollmentEmbeddings:
     rng = np.random.default_rng(cfg.seed)
     torch.manual_seed(cfg.seed)
+    n = len(enrollment.positives)
     clean = torch.stack([_place(torch.from_numpy(np.asarray(c, np.float32)), rng, center=True)
                          for c in enrollment.positives])
-    proto = embed(encoder, clean, None, device=device).mean(0)
-    proto /= np.linalg.norm(proto)
-
+    clean = embed(encoder, clean, None, device=device)
     pos = embed(encoder, positive_windows(enrollment.positives, cfg.augment_per_clip, cfg, rng),
                 augmenter, cfg.embed_batch, device)
     partial = embed(encoder, partial_windows(enrollment.positives, cfg.partial_per_clip, cfg, rng),
                     augmenter, cfg.embed_batch, device)
     user = embed(encoder, sliding_windows(enrollment.negatives, cfg.user_hop_s), augmenter,
                  cfg.embed_batch, device)
-    bank_neg, bank_w, info = select_bank(bank, proto, enrollment, cfg, rng)
+    return EnrollmentEmbeddings(clean, pos.reshape(n, cfg.augment_per_clip, -1),
+                                partial.reshape(n, cfg.partial_per_clip, -1), user)
 
-    neg = np.concatenate([bank_neg, partial, user])
+
+def fit_head(emb: EnrollmentEmbeddings, bank: Bank, wake_word: str, language: str,
+             cfg: FinetuneConfig = FinetuneConfig(),  # noqa: B008
+             recordings: list[int] | None = None) -> FinetuneResult:
+    """Fit the head on `recordings` (default: all of them)."""
+    rng = np.random.default_rng(cfg.seed + 1)
+    use = list(range(len(emb.clean))) if recordings is None else list(recordings)
+    proto = emb.clean[use].mean(0)
+    proto /= np.linalg.norm(proto)
+    pos = emb.positives[use].reshape(-1, emb.clean.shape[1])
+    partial = emb.partial[use].reshape(-1, emb.clean.shape[1])
+    bank_neg, bank_w, info = select_bank(bank, proto, wake_word, language, cfg, rng)
+
+    neg = np.concatenate([bank_neg, partial, emb.user])
     if cfg.scorer == "prototype":
         head = prototype_head(proto, pos, neg, cfg)
     elif cfg.scorer == "mlp":
-        neg_w = np.concatenate([bank_w, np.full(len(partial) + len(user), cfg.hard_weight)])
+        neg_w = np.concatenate([bank_w, np.full(len(partial) + len(emb.user), cfg.hard_weight)])
         head = train_head(pos, neg, neg_w, cfg)
     else:
         raise ValueError(f"unknown scorer {cfg.scorer!r}")
     report = {**info, "scorer": cfg.scorer, "positives": len(pos),
-              "partial_negatives": len(partial), "user_negatives": len(user)}
+              "partial_negatives": len(partial), "user_negatives": len(emb.user)}
     return FinetuneResult(head, proto, report)
+
+
+def finetune(encoder: Encoder, enrollment: Enrollment, bank: Bank, augmenter: Augmenter,
+             cfg: FinetuneConfig = FinetuneConfig(), device: str | torch.device = "cpu") -> FinetuneResult:  # noqa: B008
+    emb = embed_enrollment(encoder, enrollment, augmenter, cfg, device)
+    return fit_head(emb, bank, enrollment.wake_word, enrollment.language, cfg)

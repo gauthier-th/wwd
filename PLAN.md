@@ -1,6 +1,6 @@
 # Few-shot wake-word trainer: plan
 
-Last updated: 2026-10-06 (M1 done: base model v0.1)
+Last updated: 2026-10-07 (M2 done: fine-tuning server)
 
 ## 1. Goal and scope
 
@@ -82,6 +82,11 @@ and the detector logic: ring buffer, VAD state, gating, smoothing, refractory pe
 
   **Why int8 needs a wider tolerance.** int8 kernels differ between platforms: wasm SIMD, x86 VNNI, ARM dot-product. A rare one-step requantization difference moves one score by about 1e-2. M0 measured, wasm vs native: fp32 max 7.6e-7; int8 max 1.1e-2, mean 9e-5.
 
+- **Server bundles** (a real model on minutes of audio) are checked the same way by `scripts/check_bundle.py` (Python) and `runtime/js/test/bundle.test.ts` (wasm). Two bounds are looser there, both measured in the M2 smoke run:
+  - **VAD:** within 1e-4. Its LSTM state accumulates float differences over minutes: 1.2e-5 after 2 min.
+  - **int8:** mean ≤ 1e-3, at most 1% of ticks off by more than 2e-2, none by more than 0.1. On the real encoder, 2 ticks of 1572 moved by up to 0.035, while 99% agreed within 1e-6.
+  - **Events** must be identical, unless a tick's scores straddle the threshold across runtimes; the test lists such ticks. That's the only way score drift can change an event, since the golden tests prove the logic identical. None straddled in M2.
+
 **Test matrix:**
 - pytest with Python ORT on x86_64 (aarch64 on the Pi in M4).
 - vitest running onnxruntime-web in Node, which exercises the wasm build.
@@ -133,7 +138,7 @@ training/  (offline, GPU, once per base-model version)
   MSWC(12 langs) + MUSAN + RIRs + MLS/LibriSpeech
       → student (M1) / teacher → distilled student (M5)
       → models/base/<ver>/  encoder.pt, encoder(.int8).onnx, neg_bank.npz,
-                            longform_cache.npz, longform_verify/, base_model.json
+                            longform_cache(.int8).npz, longform_verify.npz, base_model.json
                                                           │
 web/ (React) ──WAV uploads──► server/ API ──job──► server worker ◄┘
      ▲                                     (augment, train head, calibrate,
@@ -148,7 +153,7 @@ wwd/
 ├── PLAN.md
 ├── pyproject.toml        # one uv project (no build step), run from repo root;
 │                         # dependency sets: server (CPU torch), training (CUDA torch), dev
-├── core/                 # shared: frontend, encoder, head, finetune(), export + graph checker, audio utils
+├── core/                 # shared: frontend, encoder, head, finetune(), calibrate, export + compose + graph checker, verify
 ├── training/             # python -m training.<step>
 ├── server/               # uvicorn server.api:app  ·  python -m server.worker
 ├── runtime/              # Python runtime, flat modules: spec.py, vad.py, detector.py, wav.py, listen.py
@@ -158,7 +163,7 @@ wwd/
 │   ├── testdata/         # golden WAVs, stub models, golden.json, logic_cases.json
 │   └── js/               # TS runtime @wwd/runtime: same detector + VAD wrapper
 ├── web/                  # React + Vite + TypeScript; src/audio = worklet, worker, pipeline
-├── scripts/              # make_golden.py (regenerates runtime/testdata)
+├── scripts/              # make_golden.py (runtime/testdata), m1_pipeline.sh, m2_smoke.sh + check_bundle.py
 ├── .github/workflows/    # ci.yml: Python, JS (wasm in Node), browsers
 ├── pnpm-workspace.yaml   # web, runtime/js
 ├── data/                 # gitignored: downloads, extracted clips, memmaps
@@ -279,6 +284,7 @@ Every step runs as `python -m training.<step>`, configured with CLI flags. `scri
    - `encoder.onnx` and `encoder.int8.onnx` (static QDQ, calibrated on bank clips)
    - `neg_bank.npz`: augmented embeddings of the 200k bank clips
    - `longform_cache.npz`: per-tick calibration embeddings, plus the word timeline
+   - `longform_cache.int8.npz` (since M2): the same ticks through `encoder.int8.onnx`, on onnxruntime, so int8 files get their own threshold (§9.3)
    - `longform_verify.npz`: raw verification audio
    - `augment_assets.npz`: 30 min of noise, 10 min of babble and 500 RIRs, for the CPU server
    - `base_model.json`: version, sources, file hashes
@@ -306,34 +312,48 @@ The bank is a fixed sample of clips taken from the MSWC download that `training/
 
 ## 9. `server/`: API and fine-tune worker
 
-**Stack:** FastAPI, Pydantic v2, SQLModel on SQLite (Postgres later), soxr, soundfile, torch (CPU), onnx, and `runtime`.
+**Stack:** FastAPI (native SSE), Pydantic v2, SQLModel on SQLite (Postgres later), soxr, soundfile, torch (CPU), onnx, and `runtime`.
 - **Jobs:** a DB table, taken one at a time by a single worker process. Move to Celery or arq only if scale requires it.
-- **Storage:** a small interface over the local filesystem now, S3 later.
+- **Storage:** a small interface over the local filesystem now (`server/storage.py`), S3 later.
+- **Configuration:** environment variables (`server/settings.py`): `WWD_SERVER_DATA`, `WWD_MODELS`, `WWD_BASE_VERSION`, `WWD_DEVICE`, `WWD_VERIFY_WORKERS`.
 
 ### 9.1 API
 
+Built in M2 (`server/api.py`; OpenAPI docs at `/docs`). There's no authentication before M6; IDs are random UUIDs.
+
 ```
-GET    /api/languages                          the 12 codes + reading paragraphs
-POST   /api/wakewords                          {name, language}
-POST   /api/wakewords/{id}/samples             multipart WAV, kind=positive|other_speech|ambience
+GET    /api/health
+GET    /api/languages                              the 12 codes + reading paragraphs
+GET    /api/base-models                            versions, evaluation summary, default
+POST   /api/wakewords                              {name, language}
+GET    /api/wakewords/{id}                         the wake word, its samples and trainings
+DELETE /api/wakewords/{id}                         deletes recordings, models and rows (GDPR)
+POST   /api/wakewords/{id}/samples                 multipart file + kind=positive|other_speech|ambience
+GET    /api/wakewords/{id}/samples/{sid}/audio     the processed 16 kHz clip (review, playback)
 DELETE /api/wakewords/{id}/samples/{sid}
-POST   /api/wakewords/{id}/trainings           {mode: quick|quality, target_fa_per_hour}
-GET    /api/trainings/{tid}                    status + metrics
-GET    /api/trainings/{tid}/events             SSE progress
-GET    /api/trainings/{tid}/artifacts/{file}
-GET    /api/base-models
-DELETE /api/wakewords/{id}                     deletes recordings + models (GDPR)
+POST   /api/wakewords/{id}/trainings               {mode: quick|quality, target_fa_per_hour, base_version?}
+GET    /api/trainings/{tid}                        status, stage, progress, report
+GET    /api/trainings/{tid}/events                 SSE: `progress` events, then `done`|`failed`|`cancelled`
+GET    /api/trainings/{tid}/artifacts/{file}       model.onnx, model.int8.onnx, model.json, vad.onnx,
+                                                   LICENSE-silero-vad, ATTRIBUTION.md, README.md,
+                                                   report.json, bundle.zip
 ```
+
+- **Jobs:** `POST …/trainings` snapshots the sample IDs and queues a `Training` row. `python -m server.worker` claims queued rows one at a time; progress goes to `TrainingEvent` rows, which the SSE endpoint streams (it resumes after `Last-Event-ID`). A worker that starts finds jobs left `running` by a crash and queues them again.
+- **One active training per wake word** (409 otherwise). Quality mode returns 422 until M6.
+- **Deletion while training:** the worker checks between stages, stops, and removes what it wrote.
+- **Storage:** everything a user owns lives under `wakewords/<id>/` (originals, clips, trainings), so deletion is one prefix. SQLite runs in WAL mode, shared by the API and the worker.
 
 ### 9.2 Upload checks
 
-Each upload goes through these steps:
-1. Keep the original file.
-2. Resample to 16 kHz.
-3. Trim and segment with the `runtime` VAD, the same file the browser uses.
-4. Normalize loudness.
-5. Reject clips that are clipped, silent, or longer than about 1.3 s of speech.
-6. Compute each clip's similarity to the other samples, and flag outliers such as a mispronunciation or the wrong word.
+Each upload goes through these steps (`server/audio.py`):
+1. Keep the original file, as received.
+2. Decode anything libsndfile reads (WAV, FLAC, OGG), downmix, resample to 16 kHz with soxr. Limits: 25 MB, 180 s.
+3. **Positives:** one take holds several utterances. The `runtime` Silero VAD, the same file the browser runs, cuts it, with Silero's hysteresis (start at p ≥ 0.5, end after 0.35 s below 0.35), so the short pause inside "hey jarvis" doesn't split the phrase. Each clip keeps up to 0.2 s around its speech, less for long words, so it fits the 1.5 s window.
+4. **Rejected clips** are kept with a reason, so the UI can say why: `too_long` (speech over 1.3 s), `too_short` (under 0.2 s), `clipped` (0.1% of samples at full scale), `too_quiet` (speech under −55 dBFS). A whole upload is refused (422) when it's silent or holds no speech.
+5. Normalize loudness: speech RMS to −20 dBFS, peak at most −1 dBFS, 10 ms fades.
+6. **Outliers:** each accepted recording's cosine to the prototype of the others, through `encoder.onnx`. It's flagged below 0.5, or 0.2 below the median. Flagged recordings are left out of training; the UI should offer a re-record.
+7. **Other speech** needs at least 2 s of speech. **Ambience** only has to be something other than digital silence.
 
 ### 9.3 Quick mode (default)
 
@@ -352,14 +372,22 @@ Target: under 2 minutes on CPU. No GPU on the server.
    - **Why:** on 48 held-out words at 0.5 false accepts/h, the trained MLP head reached 18% recall and the plain prototype 73%. The MLP fits augmentations of only 10 clips, never sees continuous speech, and is overconfident on long-form audio (calibrated thresholds land around 0.99).
    - **Push strength:** 0.4–0.6 is best (79% recall); 0.8 and above collapses onto the negatives. The MLP head remains available as `FinetuneConfig(scorer="mlp")`.
    - Augmented positives are still embedded; they set the bias and feed the recall estimate.
-4. **Leave-2-out folds:** estimate recall and flag weak recordings. The final prototype uses all recordings.
-5. **Calibration:** run the head plus the §4.3 smoothing over `longform_cache.npz` with the gate off, and pick the threshold that meets `target_fa_per_hour` (default 0.5/h).
-6. **Compose:**
-   - Export the head from torch as a tiny ONNX graph.
-   - Merge it with `encoder.onnx` and with `encoder.int8.onnx` using `onnx.compose`. Both encoders were quantized and validated once, in `training/`.
-   - Run the graph checker.
-   - Write the metadata.
-7. **Verify:** run the *shipped* files through the `runtime` Python detector on `longform_verify/`, with the gate on and off. Check parity with the PyTorch scores. Report recall, false accepts per hour, and fp32 vs int8.
+4. **Leave-2-out folds:** for each pair of recordings, fit the head on the others, calibrate it like the final model, and measure streaming recall on the held-out pair: 10 augmented copies at 6 consecutive tick offsets, 2-of-3 detection (`recall_noisy`), plus a clean copy (`recall_clean`). Embedding happens once (`core.finetune.embed_enrollment`); each fold only refits the head (`fit_head`). A recording is flagged weak when its noisy recall is under 0.5 and 0.25 below the median. The final prototype uses all recordings.
+5. **Calibration, once per shipped file:** run the head plus the §4.3 smoothing over the long-form cache with the gate off, and pick the threshold that meets `target_fa_per_hour` (default 0.5/h). Occurrences of the wake word in the long-form audio are masked.
+   - `model.onnx` is calibrated on `longform_cache.npz`; `model.int8.onnx` on `longform_cache.int8.npz`, the same streams embedded through `encoder.int8.onnx` itself. Each file's metadata carries its own threshold.
+   - **Why separate thresholds (measured in M2):** int8 embeddings sit at cosine 0.98 from fp32 on average (1st percentile 0.88), and that moves each wake word's scores by a different amount. With fp32's threshold, int8 lost recall on some words (0.70 vs 0.85) and doubled false accepts on others (0 vs 1.4/h).
+   - Base models exported before M2 lack the int8 cache; `training.export --int8-cache-only` adds it (152 s for v0.1). Without it, the int8 file shares the fp32 threshold and the report says so.
+6. **Compose** (`core.export.compose_head`):
+   - Export the head plus a Sigmoid from torch as a tiny ONNX graph, its names prefixed `head/`.
+   - Merge it after `encoder.onnx` and after `encoder.int8.onnx` with `onnx.compose.merge_models`. Both encoders were quantized and validated once, in `training/`, and their sha256 must match `base_model.json`. The head stays float32 in both files.
+   - Run the graph checker, and write the same metadata into both files.
+7. **Verify** (`core.verify`): run the *shipped* files through the Python `runtime.Detector` over the 1.4 h of `longform_verify`.
+   - **Scores:** one single-threaded runtime session per stream, run in parallel threads at batch 1. At batch 64, 16 parallel fp32 sessions are memory-bound and 7× slower in aggregate.
+   - **Gate on:** the model is stateless, so a gate-open tick scores the same either way. The gate-off scores are replayed through the runtime's own `Gate` and `Trigger` with the stream's VAD probabilities, which are computed once per base model and cached.
+   - **Each recording** is also run alone between pauses, through the full runtime path with the VAD gate (in-sample, a sanity check).
+   - **Parity:** runtime scores against PyTorch on 128 ticks: the 64 the fp32 file scored highest, plus 64 at random.
+   - **Report:** false accepts per hour for fp32 and int8 with the gate on and off, enrollment detections, parity, fold recall and per-stage timings, in `report.json` and the training row.
+8. **Bundle** (`server/bundle.py`): `model.onnx`, `model.int8.onnx`, `model.json` (the metadata, file hashes and evaluation), `vad.onnx`, Silero's license, `ATTRIBUTION.md`, a `README.md`, and `bundle.zip` of all of them.
 
 ### 9.4 Quality mode (M6)
 
@@ -416,7 +444,7 @@ Target: under 2 minutes on CPU. No GPU on the server.
 |---|---|---|
 | **M0** ✅ | uv project + pnpm workspace; `core` frontend + stub encoder export; graph checker; pinned Silero VAD; `runtime/SPEC.md`; Python + JS detectors; golden vectors; CI (pytest, vitest with onnxruntime-web wasm in Node, Playwright) | **Done 2026-10-05.** pytest 33/33, vitest 21/21, Playwright 4/4 (Chromium + Firefox). Identical events in every runtime; VAD matches the official wrapper. |
 | **M1** ✅ | `training`: download, prepare, student-only training, few-shot and end-to-end evals, bank, base **v0.1** | **Done 2026-10-06.** Few-shot (10 clips) recall@1%FAR **95.1%** on unseen words. End to end **77% recall at 0.5 false accepts/h** (82% at 1/h), with calibration holding out of sample (0.60/h measured). Encoder parity: wasm vs Python 1.3e-7 (fp32), int8 bit-identical. See §12.1. |
-| **M2** | `server`: uploads + checks, jobs, quick mode, calibration, compose, verify, SSE | A curl-driven run produces a bundle that passes the dual-runtime tests |
+| **M2** ✅ | `server`: uploads + checks, jobs, quick mode, calibration, compose, verify, SSE | **Done 2026-10-07.** `scripts/m2_smoke.sh` drives the API with curl against v0.1: a French held-out word, a 10-utterance take, 54 s of training on the CPU, 0 false accepts in 1.4 h of held-out audio, and 48/50 (fp32) and 47/50 (int8) other speakers' utterances detected. Python and wasm runtimes fire identically on the bundle. On 24 held-out words, the shipped fp32 file reaches 80.9% recall at 0.36 false accepts/h out of sample (PyTorch: 79.7%); int8 reaches 78.9% at 0.38/h. See §12.2. |
 | **M3** | `web`: record → review → train → live test → download | The full flow works in Chrome, Firefox and mobile Safari |
 | **M4** | Devices: Pi 4/5 (Python ORT on aarch64), phone browser (wasm) | CPU %, latency and a 24 h real-room false-accept test (TV + speech) measured on each |
 | **M5** | Base **v1**: XLS-R teacher + distillation | End-to-end metrics beat v0.1. Older user models keep their base version. |
@@ -446,7 +474,7 @@ The base model is BC-ResNet (204k parameters, 256-dim embedding), trained for 80
 - **This test is cross-speaker,** which is harder than a user detecting their own voice.
 - **The scorer matters more than anything else measured:** the MLP head planned for §9.3 gave **20%** on the same protocol. §9.3 explains why it was replaced.
 
-**int8:** embeddings agree with fp32 at cosine 0.98 on average. Few-shot recall with 10 clips drops 95.6 → 95.1, and with 1 clip 84.6 → 82.8. Whether int8 holds at the 0.5 FA/h operating point is the M2 verification step's job.
+**int8:** embeddings agree with fp32 at cosine 0.98 on average. Few-shot recall with 10 clips drops 95.6 → 95.1, and with 1 clip 84.6 → 82.8. Whether int8 holds at the 0.5 FA/h operating point is the M2 verification step's job (answered in §12.2: yes, with its own threshold).
 
 **Next levers (v0.2)**, roughly by expected value:
 1. Phrase classes, so multi-word wake words fit the 1.5 s window and train as single units.
@@ -454,13 +482,55 @@ The base model is BC-ResNet (204k parameters, 256-dim embedding), trained for 80
 3. Better Kinyarwanda coverage.
 4. In the app, guide users toward long wake words and several voices at enrollment.
 
+### 12.2 M2 results (fine-tuning server)
+
+**Shipped files on 24 held-out words** (`training.eval_shipped`: 2 words per language, the same draw as `eval_e2e`). Each word goes through the server's own quick mode (`server.quick.run`). Then the Python runtime runs the shipped files over a stream of 10 to 50 other speakers saying the word, 3 s apart, plus the 1.4 h verification audio. The target is 0.5 false accepts/h.
+
+| | Recall, gate off | Recall, gate on | False accepts/h (out of sample) |
+|---|---|---|---|
+| PyTorch (`eval_e2e`, same words) | 79.7% | | 0.36 |
+| `model.onnx` (fp32) | **80.9%** | 80.1% | **0.36** (12 in 34 h) |
+| `model.int8.onnx`, own threshold | 78.9% | 78.5% | 0.38 (13) |
+| `model.int8.onnx`, fp32's threshold | 79.0% | 78.7% | 0.44 (15) |
+
+- **The shipped fp32 file reproduces PyTorch.** That closes M1's open gap.
+  - Per-tick difference: at most 2.9e-6.
+  - Per-word recall: within 6 points, 1.1 points higher on average. The protocols differ slightly: here every tick is streamed, while `eval_e2e` uses 6 shifts.
+  - Median word recall is 82%. 13 of 24 words reach 80%; one (Kinyarwanda) falls below 50%.
+- **The speech gate** costs under 1 point of recall. Over these streams it removed no false accepts: they happen during speech, which the gate lets through.
+- **int8 needs its own threshold.**
+  - int8 and fp32 scores differ by up to 0.16 on single ticks (mean over words of each word's worst tick), and the shift depends on the word. With fp32's threshold, int8 recall dropped 15 points on one word, and another word's false accepts went from 0 to 1.4/h.
+  - Each file is now calibrated on its own scores (§9.3 step 5). Thresholds differ by 0.038 on average, up to 0.09. int8 then hits the target on the calibration audio exactly like fp32 (0.487/h).
+  - **The remaining cost of int8:** about 2 points of recall at the same false-accept rate.
+- **The in-job recall estimate (leave-2-out folds) is pessimistic and noisy.** It averages 62%, against 81% measured on other speakers, and correlates only 0.41 with the measured recall per word. It is fit on 8 recordings and tested under 0–25 dB SNR noise. Present it in the UI as a rough quality signal, not a promise.
+- **Speed.** Quick mode takes 52–54 s per wake word on the CPU (16 threads), against the 2-minute target:
+
+  | Stage | Time |
+  |---|---|
+  | Embedding (3000 augmented positives, 360 partials, recall windows) | 11–12 s |
+  | Folds | 1.3 s |
+  | Calibration (both files) | 0.3 s |
+  | Compose | under 0.1 s |
+  | Verify (both files over 1.4 h, parallel runtime sessions) | 39 s |
+
+  With the encoder on the GPU, it takes 38 s.
+- **Upload checks on real takes.** VAD segmentation cut a 10-utterance take into 10 clips. Leave-one-out similarity was 0.81–0.95; the one flagged outlier (0.70) is a truncated MSWC clip.
+- **Smoke run** (`scripts/m2_smoke.sh fr`, the M2 done-check; it needs the `training/` data to build its inputs):
+  - **Inputs:** the held-out word "morceaux", 10 enrollment clips from one speaker in one take, 40 other words by that speaker as other speech, and 15 s of MUSAN ambience.
+  - **Training:** 9 recordings kept, 53.9 s on the CPU. Calibrated thresholds: 0.064 (fp32) and 0.081 (int8).
+  - **On the shipped files:** 0 false accepts in 1.4 h. Through the Python runtime, 48/50 (fp32) and 47/50 (int8) of other speakers' utterances detected, with no other events.
+  - **Parity:** the wasm runtime reproduces the Python runtime on both test files (9/9 tests; events identical; no tick straddles a threshold).
+
 ## 13. Decisions
 
 **Made:**
 - **Window:** 1.5 s (fits 2–3-word phrases), hop 1536 samples.
 - **Languages:** the 12 MSWC high-resourced languages only. No Common Voice.
 - **Runtimes:** onnxruntime-web (wasm) + Python onnxruntime, held to golden-vector parity.
-- **int8 contract:** per-tick drift ≤ 2e-2 (mean ≤ 1e-3) across runtimes, with identical events. Before shipping int8 for a real model, M1 must also show that int8 agrees with fp32 on the evals. The M0 stub isn't representative of that.
+- **int8 contract:** per-tick drift ≤ 2e-2 (mean ≤ 1e-3) across runtimes on the golden vectors, with identical events. For real bundles the bounds are those measured in M2 (§3). int8 agrees with fp32 on the evals (§12.1, §12.2).
+- **Thresholds per file:** `model.onnx` and `model.int8.onnx` each carry a threshold calibrated on their own scores (§9.3 step 5).
+- **Verification replays the gate:** the gate-on numbers reuse the gate-off scores through the runtime's own `Gate` and `Trigger`, which is exact because the model is stateless (§9.3 step 7).
+- **Outliers stay out of training:** recordings flagged at upload are excluded, and the UI asks for a re-record.
 - **Layout:** flat Python packages (`core/`, `training/`, `server/`, `runtime/`), one uv project.
 - **Teacher:** XLS-R 300M (Apache-2.0), frozen on the local GPU.
 - **Default export:** one merged file per wake word.
@@ -473,11 +543,13 @@ The base model is BC-ResNet (204k parameters, 256-dim embedding), trained for 80
 
 ## 14. Risks
 
-- **False accepts with about 10 samples.** These may miss the target rate. The calibration report shows it honestly, and a second-stage verifier can be added to the runtime later.
+- **False accepts with about 10 samples.** Measured in M2: the target holds out of sample on average (0.36/h for a 0.5/h target), but 1.4 h of verification audio per job can only resolve about 0.7/h, so a single word's report is coarse. A second-stage verifier can be added to the runtime later.
+- **The in-job recall estimate is a weak predictor** (correlation 0.41 with measured recall, §12.2). Better: more held-out audio per fold, or a learned predictor from `eval_shipped` runs.
 - **Always-on listening in a phone browser** only works while the page is in the foreground; iOS Safari stops the mic when the screen locks. True background listening needs a native app, and the ONNX contract keeps that possible.
 - **Mismatch between the recording mic and the device mic.** Mitigated by EQ augmentation and by recording on the target device.
 - **Languages with little data** (cy, eu, pl, ru: about 110–140 h each) turned out fine in v0.1 (79–87% end to end). The weak one is **Kinyarwanda (46%)**, despite 422 h: it has only 322 speakers, and its words are long and agglutinative. Short wake words (4 characters or fewer) are weak in every language, at about 50%.
-- **Privacy.** Voice recordings are personal data under GDPR. Plan a retention policy and a delete endpoint (§9.1).
+- **Privacy.** Voice recordings are personal data under GDPR. The delete endpoint exists (M2: it removes every file and row, and stops a running job). A retention policy and auth are M6.
+- **Reading paragraphs** (`server/languages.py`) were written without native speakers. The rw, fa, eu and cy texts are flagged `needs_review`.
 
 ## Sources
 

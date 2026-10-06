@@ -110,3 +110,39 @@ def test_prototype_head_is_a_cosine_against_a_pushed_prototype():
         p_score = head(torch.from_numpy(proto[None])).item()
         n_score = head(torch.from_numpy(hard[:1])).item()
     assert p_score > 0 > n_score  # sigmoid midpoint between positives and hard negatives
+
+
+def test_tick_windows_follow_the_runtime_windowing():
+    from core.finetune import HOP, SHIFTS, tick_windows
+
+    clip = np.arange(1, 8001, dtype=np.float32)  # distinguishable samples
+    w = tick_windows([clip], 2, None).numpy()
+    assert w.shape == (2 * SHIFTS, WINDOW)
+    for k in range(SHIFTS):  # shift k: the clip ended k ticks before the window's end
+        end = WINDOW - k * HOP
+        np.testing.assert_allclose(w[k, end - 8000 : end], clip, atol=1e-2)
+        assert np.abs(w[k, end:]).max(initial=0.0) < 1e-2
+
+
+def test_fit_head_on_a_subset_matches_finetune_on_that_subset():
+    from core.finetune import embed_enrollment, fit_head
+
+    torch.manual_seed(0)
+    rng = np.random.default_rng(0)
+    encoder = Encoder(EncoderConfig(width=8, embedding_dim=32)).eval()
+    t = np.arange(12000) / 16000
+    words = [(0.3 * np.sin(2 * np.pi * f * t) * np.hanning(len(t))).astype(np.float32)
+             for f in (300, 320, 340)]
+    bank_emb = rng.normal(size=(500, 32)).astype(np.float32)
+    bank = Bank((bank_emb / np.linalg.norm(bank_emb, axis=1, keepdims=True)).astype(np.float16),
+                np.array(["w"] * 500), np.array(["en"] * 500))
+    aug = Augmenter(AugmentConfig(), NoiseBank(rng.normal(0, 0.1, 64000)), None, None)
+    cfg = FinetuneConfig(augment_per_clip=4, partial_per_clip=2, hard_negatives=50,
+                         random_negatives=200)
+    emb = embed_enrollment(encoder, Enrollment("x", "en", words), aug, cfg)
+    assert emb.positives.shape == (3, 4, 32) and emb.partial.shape == (3, 2, 32)
+    full, part = fit_head(emb, bank, "x", "en", cfg), fit_head(emb, bank, "x", "en", cfg, [0, 2])
+    np.testing.assert_allclose(part.prototype, emb.clean[[0, 2]].mean(0)
+                               / np.linalg.norm(emb.clean[[0, 2]].mean(0)), atol=1e-6)
+    assert part.report["positives"] == 8 and full.report["positives"] == 12
+    assert part.report["partial_negatives"] == 4

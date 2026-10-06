@@ -16,8 +16,13 @@ server = [
     "onnx>=1.19",
     "soundfile>=0.13",
     "soxr>=0.5",
+    "fastapi>=0.118",
+    "uvicorn>=0.37",
+    "sqlmodel>=0.0.25",
+    "python-multipart>=0.0.20",
 ]
-# Offline base-model training: CUDA torch.
+# Offline base-model training: CUDA torch. Also carries the server's API stack, so one
+# development venv runs everything (the server then uses CUDA torch on the CPU).
 training = [
     "torch==2.14.1",
     "onnx>=1.19",
@@ -27,6 +32,10 @@ training = [
     "huggingface_hub>=1.0",
     "pyarrow>=21",
     "pandas>=2.3",
+    "fastapi>=0.118",
+    "uvicorn>=0.37",
+    "sqlmodel>=0.0.25",
+    "python-multipart>=0.0.20",
 ]
 
 [dependency-groups]
@@ -34,6 +43,7 @@ dev = [
     "pytest>=8.4",
     "import-linter>=2.5",
     "ruff>=0.13",
+    "httpx>=0.28",
 ]
 
 [tool.uv]
@@ -58,7 +68,7 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.pytest.ini_options]
-testpaths = ["core/tests", "runtime/tests"]
+testpaths = ["core/tests", "runtime/tests", "server/tests"]
 pythonpath = ["."]
 
 [tool.ruff]

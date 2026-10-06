@@ -7,6 +7,7 @@ self-attention + attentive pooling tail follows the EdgeSpot recipe.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -194,3 +195,11 @@ class Encoder(nn.Module):
         x = self.tail(self.blocks(self.head(self.spec_augment(self.frontend(audio)))))  # [N, D, 1, T]
         x = self.attention(x.squeeze(2).transpose(1, 2))
         return l2_normalize(self.project(self.pool(x)))
+
+
+def load_encoder(checkpoint: str | Path, device: str | torch.device = "cpu") -> Encoder:
+    """Encoder from a training checkpoint or a base model's encoder.pt (eval mode)."""
+    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    encoder = Encoder(EncoderConfig(**ckpt["encoder_config"]))
+    encoder.load_state_dict(ckpt["encoder"])
+    return encoder.to(device).eval()

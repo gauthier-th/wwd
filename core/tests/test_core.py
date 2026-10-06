@@ -126,3 +126,26 @@ def test_checker_rejects_non_portable_graphs(tmp_path):
 
     with pytest.raises(GraphCheckError, match="outputs must be"):
         check_graph(ok, outputs=["embedding"])
+
+
+@pytest.mark.parametrize("int8", [False, True], ids=["fp32", "int8"])
+def test_compose_head_matches_encoder_plus_head(model, tmp_path, int8):
+    from core.export import compose_head
+    from core.model import PrototypeHead
+
+    enc = tmp_path / "encoder.onnx"
+    export_module(model.encoder, enc, output_name="embedding", metadata={"base_model_version": "x"})
+    if int8:
+        calib = np.random.default_rng(0).normal(0, 0.1, (8, 24000)).astype(np.float32)
+        quantize_int8(enc, tmp_path / "encoder.int8.onnx", calib, output_name="embedding")
+        enc = tmp_path / "encoder.int8.onnx"
+    direction = torch.nn.functional.normalize(torch.randn(256), dim=0)
+    head = PrototypeHead(direction, 20.0, -4.0)
+    compose_head(enc, head, tmp_path / "model.onnx", metadata={"threshold": "0.75", "wake_word": "ça"})
+    assert read_metadata(tmp_path / "model.onnx") == {"threshold": "0.75", "wake_word": "ça"}
+    x = np.random.default_rng(1).normal(0, 0.1, (3, 24000)).astype(np.float32)
+    emb = ort.InferenceSession(str(enc)).run(None, {"audio": x})[0]
+    got = ort.InferenceSession(str(tmp_path / "model.onnx")).run(None, {"audio": x})[0]
+    want = torch.sigmoid(head(torch.from_numpy(emb))).detach().numpy()
+    assert got.shape == (3,)
+    np.testing.assert_allclose(got, want, atol=1e-6)
