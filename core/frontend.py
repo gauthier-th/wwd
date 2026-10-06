@@ -103,7 +103,12 @@ class Frontend(nn.Module):
         return F.conv1d(spec * spec, self.mel)  # [N, n_mels, T]
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
-        """[N, samples] -> [N, 1, n_mels, frames]."""
+        """[N, samples] -> [N, 1, n_mels, frames]. Always float32: PCEN divides energies as
+        small as 1e-9, which bf16/fp16 autocast would destroy."""
+        with torch.autocast(audio.device.type, enabled=False):
+            return self._forward(audio.float())
+
+    def _forward(self, audio: torch.Tensor) -> torch.Tensor:
         energy = self.mel_energies(audio)
         if self.frozen is not None:
             weights, alpha, delta, r, delta_r = (

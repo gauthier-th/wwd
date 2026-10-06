@@ -24,6 +24,9 @@ training = [
     "soundfile>=0.13",
     "soxr>=0.5",
     "silero-vad>=6.2.3",
+    "huggingface_hub>=1.0",
+    "pyarrow>=21",
+    "pandas>=2.3",
 ]
 
 [dependency-groups]

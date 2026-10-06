@@ -1,6 +1,6 @@
 # Few-shot wake-word trainer: plan
 
-Last updated: 2026-10-05 (M0 done)
+Last updated: 2026-10-06 (M1 done: base model v0.1)
 
 ## 1. Goal and scope
 
@@ -35,7 +35,7 @@ A user records a few examples of a wake word in the browser. The server fine-tun
 |---|---|---|
 | 1 | ✅ Install **uv**: `curl -LsSf https://astral.sh/uv/install.sh \| sh` | It edits your shell profile. The system Python is 3.9 (pyenv). Leave it alone: uv installs Python 3.12 for this project. |
 | 2 | ✅ **Hugging Face account + read token**: after uv, run `uvx --from huggingface_hub hf auth login` | Only you can create the account. MSWC isn't gated and anonymous downloads work, but about 104 GB anonymously risks rate limits. |
-| 3 | **Run the large downloads** (about 120 GB, several hours) with the resumable `training.download` script from M1, or let Claude start it in the background | Your bandwidth and your timing |
+| 3 | ✅ **Large downloads** (about 135 GB): done by `training.download`, resumed once after an interruption | Your bandwidth and your timing |
 | 4 | ✅ Not needed on this machine: Chromium and Firefox ran without extra system libraries. CI installs them with `--with-deps`. | |
 | 5 | **HTTPS for testing on a phone over the LAN** (M3): mkcert with its CA trusted on the phone, or a tunnel such as cloudflared | Needs your devices. Browsers only allow mic access on HTTPS or localhost. |
 | 6 | **Hardware for M4**: a Raspberry Pi 4/5 with a USB mic, and a phone | |
@@ -217,22 +217,21 @@ The API and the language picker accept only these 12 codes.
   - audio: `data/opus/{lang}/{split}/audio/{n}.tar.gz`
   - splits: `data/splits/{lang}/splits.tar.gz`, a CSV with link, word, valid, speaker and gender.
 - **Download method:** the repo's `load_dataset` path is a loading script, which current `datasets` releases no longer run. Download the files directly with `huggingface_hub` and `allow_patterns`.
-- **Shards are sorted alphabetically by word.** French shard 0 starts at "abad, abandonna, abandonne…". You can't take a subset of shards. Every shard of a language has to be streamed, keeping only the clips you selected.
-- **Process, one language at a time:**
-  1. Download the shards.
-  2. Extract the selected clips as opus.
-  3. Delete the archives.
-
-  Peak extra disk is about one language's worth of archives, at most 31 GB (English).
-- **Decoding:** clips stay opus (48 kHz) on disk. DataLoader workers decode them and resample to 16 kHz with soxr. Decoding everything to int16 would take about 700 GB.
+- **Shards are sorted alphabetically by word.** French shard 0 starts at "abad, abandonna, abandonne…". You can't take a subset of shards; every shard of a language has to be streamed.
+- **Real size (M1):** 365 shards, **116 GB** of opus for the 12 languages. The 103.6 GB in §6.1 left out the `dev` split. The connection limits the download to about 11 MB/s, so it takes about 3 hours. OpenSLR files come from the EU mirror (`openslr.elda.org`, about twice as fast from France), with `www.openslr.org` as fallback.
+- **As built (`training.download`):** each shard is downloaded, sha256-verified against its Hugging Face LFS hash, and streamed into a **packed store**: `data/mswc/{lang}/{split}/{n}.bin` holds the concatenated `.opus` files, and `{n}.parquet` holds word, clip, offset and length. The archive is then deleted. The parquet is written last, so it doubles as the done marker, and a re-run resumes. That's 134 GB and 365 + 365 files, instead of about 20M loose files.
+- **Decoding:** clips stay opus on disk. `training/opus.py` calls the system libopus through ctypes and decodes **directly at 16 kHz**: about 1,500 clips/s per core, against 305 for soundfile + soxr at 48 kHz. Lengths match exactly; the median clip agrees with the soxr path to 55 dB. If libopus is missing, it falls back to soundfile. Decoding everything to int16 would take about 700 GB.
+- **MSWC's own splits share speakers.** For example, 1,160 of the 1,175 Welsh dev speakers are also in train. They can't measure generalization to new speakers, so `prepare` defines its own splits (§7).
 
 ### 6.4 Disk budget
 
-The total stays under about 150 GB of the 480 GB free:
-- extracted MSWC clips: ≤ about 100 GB
-- MUSAN: 11 GB
-- negative bank memmap: 6.4 GB
-- everything else: a few GB
+Measured in M1, about 165 GB in total:
+- MSWC packed store: 134 GB
+- MUSAN: 12 GB
+- RIRs: 3.6 GB
+- MLS dev+test: 5 GB
+- negative bank: 6.4 GB
+- long-form streams: 1.8 GB
 
 ### 6.5 Licensing
 
@@ -241,52 +240,64 @@ The total stays under about 150 GB of the 480 GB free:
 
 ## 7. `training/`: base model pipeline
 
-Every step runs as `python -m training.<step>` with a YAML config.
+Every step runs as `python -m training.<step>`, configured with CLI flags. `scripts/m1_pipeline.sh` chains all of them. It's meant to run detached (`setsid nohup`) so it survives the editor session ending, every step resumes, and `START_AT=<step>` skips steps already done.
 
 1. **`download`.** Fetches everything in §6.2. It's resumable and checks checksums.
-2. **`prepare`.**
-   - Builds a parquet manifest with lang, word, speaker, gender, split and path.
-   - **Selects keyword classes.** Starting values: at least 20 clips and at least 5 speakers per class, capped at 500 clips per class.
-   - **Eval sets.** The eval split holds out 10% of eligible words in each language and also uses MSWC's speaker-disjoint dev/test splits.
-   - **Phrase augmentation.** Builds 2–3-word "phrase classes" by joining words from the same speaker with 50–150 ms gaps, so that phrases like "hey jarvis" fit the 1.5 s window.
+2. **`prepare`.** Our own splits, by stable hash, because MSWC's share speakers (§6.3):
+   - **Eval speakers:** 10% of each language's speakers. None of their clips are trained on.
+   - **Held-out words:** 10% of eligible words. They're never trained on, and few-shot and end-to-end evaluation use them.
+   - **Classes:** eligible words (at least 20 clips and at least 5 speakers, counting non-eval speakers only), capped at 300 clips per word. The cap takes speakers round-robin, to keep speaker diversity.
+   - **Result:** **85,258 classes and 7.33M training clips.** English has 15.2k words and 1.78M clips; Welsh has 2.4k words and 192k clips.
+   - **Deferred to v0.2:** phrase classes (2–3 words joined, so phrases like "hey jarvis" fit the 1.5 s window). v0.1 trains on single words.
 3. **`train_student` (M1).**
-   - **Model:** BC-ResNet with a PCEN frontend and attention pooling, about 128–300k parameters.
-   - **Loss:** Sub-center ArcFace.
-   - **Augmentation:** noise, RIR, speed 0.9–1.1, gain, SpecAugment, random EQ.
-   - **Purpose:** no teacher. This yields a usable base model quickly and unblocks the app.
+   - **Model:** BC-ResNet width 32 with a PCEN frontend, temporal self-attention and attentive pooling: 204k parameters, 256-dim embedding.
+   - **Loss:** Sub-center ArcFace (k = 3, s = 30, m = 0.3). That's a 65.5M-parameter head for 85k classes. `--margin-warmup` ramps the margin; v0.1 runs without it.
+   - **Augmentation:** speed 0.9–1.1 and random placement happen in the loader. Level, RIR, MUSAN noise/music/babble at 0–25 dB SNR, random EQ and the noise floor run on the GPU (`core/augment.py`, which the server reuses on CPU). SpecAugment runs in the encoder and only in training.
+   - **Sampling:** language share is proportional to clips^0.5 (`--lang-temperature`). English gets 15% and Basque 4.7%, instead of 24% and 2%.
+   - **Run:** batch 256, 80k steps (about 2.8 epochs), AdamW (fused), learning rate 2e-3 with cosine decay, bf16 autocast. The frontend always runs in fp32, because PCEN divides energies as small as 1e-9.
+   - **Throughput:** about 1,400 clips/s, about 4 h. The 4060 Ti is memory-bandwidth-bound (288 GB/s): BatchNorm and depthwise convs dominate the backbone, and the 85k-class head adds about 57 ms per step. Partial-FC is the next lever if retraining speed matters.
+   - **Early convergence is slow with 85k classes.** 10-shot recall@1%FAR was 8% at step 4k and 24% at step 8k.
 4. **`train_teacher` + `distill` (M5).**
    - **Teacher:** XLS-R 300M with a weighted sum of layers, attentive pooling and Sub-center ArcFace.
    - **Distillation:** the student learns from the teacher's embeddings with a cosine loss plus ArcFace.
    - **On the RTX 4060 Ti:** keep the XLS-R encoder **frozen**, so it only runs forward passes in bf16, and train only the head. Fully fine-tuning XLS-R would take much longer, which is the reason to consider renting a larger GPU.
-5. **`eval_fewshot`.** K = 1/5/10 accuracy at 1% false-alarm rate on held-out words, reported per language. EdgeSpot's 82.0% at 10-shot was measured on English MSWC only, so treat it as a sanity reference, not a target.
+5. **`evaluate`** (few-shot). For held-out words, average K = 1/5/10 enrollment clips into a prototype. Score other clips of the word against clips of other held-out words in the same language, and report recall at 1% false alarms plus the EER, per language. EdgeSpot's 82.0% at 10-shot was measured on English MSWC only, so it's a sanity reference, not a target.
 6. **`eval_e2e`.** This is the number that matters.
-   - For held-out words, enroll 10 clips from one speaker.
-   - Run the same `core.finetune()` the server uses.
-   - Measure recall on other speakers.
-   - Measure false accepts per hour by running the **`runtime` Python detector** over the long-form set. That's the shipped code path.
-7. **`build_bank`.** Builds the negative bank (§8) and the long-form sets:
-   - **`longform_cache.npz`:** encoder embeddings at a 96 ms hop over about 1 h per language plus about 2 h of music and noise, used for calibration. The speech is MSWC test-split words joined into speech-like "word salad", plus MLS or LibriSpeech where available. Some segments mix speech with MUSAN noise.
-   - **`longform_verify/`:** 1 h of held-out raw audio for checking the files that actually ship.
+   - **Enrollment:** for each held-out word, 10 clips from as few speakers as possible. MSWC rarely has 10 clips of one word from one speaker.
+   - **Fine-tune:** the same `core.finetune()` the server uses.
+   - **Calibration:** the threshold is set on the long-form cache for 0.5, 1 and 2 false accepts/h.
+   - **Recall** on other speakers' clips, streamed over 6 consecutive ticks with the 2-of-3 rule.
+   - **False accepts per hour** on the held-out verification streams, out of sample. These are counted with `core.calibrate.count_triggers`, which is tested equal to the runtime `Trigger`. They're computed on torch embeddings, though; checking the shipped ONNX files through the runtime is the server's verification step (M2).
+7. **`build_bank`.** Model-independent data: the negative bank (§8) and the long-form streams. Measured: **15.8 h in 185 five-minute streams.**
+   - **Word salad, about 1 h per language:** eval-speaker clips of non-held-out words, as utterances of 3–10 words with pauses.
+   - **Real read speech, 20 min each:** MLS for de/fr/es/it/pl, LibriSpeech for en.
+   - **Noise and music:** 2 h of MUSAN streams. MUSAN noise is also mixed into 30% of the speech streams.
+   - **Word timeline:** where every MSWC word was placed, so a user's wake word spoken in the long-form audio isn't counted as a false accept.
+   - **Split:** 10% of streams (by hash) are held out for verification.
 8. **`export`.** Writes `models/base/<ver>/`:
    - `encoder.pt`
-   - `encoder.onnx`
-   - `encoder.int8.onnx` (static QDQ quantization, calibrated on bank audio)
-   - the bank files
-   - `base_model.json` (version + hash)
+   - `encoder.onnx` and `encoder.int8.onnx` (static QDQ, calibrated on bank clips)
+   - `neg_bank.npz`: augmented embeddings of the 200k bank clips
+   - `longform_cache.npz`: per-tick calibration embeddings, plus the word timeline
+   - `longform_verify.npz`: raw verification audio
+   - `augment_assets.npz`: 30 min of noise, 10 min of babble and 500 RIRs, for the CPU server
+   - `base_model.json`: version, sources, file hashes
 
-   Each ONNX file must pass the graph checker and the dual-runtime golden tests.
+   Each ONNX file must pass the graph checker.
 
 ## 8. Negative bank (200k clips)
 
 The bank is a fixed sample of clips taken from the MSWC download that `training/` already makes.
 
-1. **Selection, using the split CSVs only:**
-   - MSWC **train** split, valid clips only, no speakers who appear in an eval set.
+1. **Selection:**
+   - Valid clips from non-eval speakers, any MSWC split.
    - **Equal quota per language,** about 16.7k each across the 12. When a small language runs out under the caps, its leftover quota goes to the others.
-   - **At most 3 clips per word,** plus a cap per speaker. This maximizes the number of distinct words, which is what hard-negative mining needs.
-   - Save the result as `bank_manifest.parquet`. It stays fixed across base-model versions.
-2. **Extraction:** decode the selected clips to 16 kHz int16 in a single memmap of about 6.4 GB. It stays on the training machine.
-3. **Embedding, once per base-model version:** `neg_bank.npz` holds fp16 embeddings (about 100 MB at D = 256) plus word, language and speaker. **Only this file goes to the server.**
+   - **At most 3 clips per word,** and at most 200 per speaker. This maximizes the number of distinct words, which is what hard-negative mining needs.
+   - Saved as `data/bank/manifest.parquet`. It stays fixed across base-model versions.
+   - **Measured (M1):** 200,000 clips, about 17.6k for most languages. Welsh (11.6k), Kinyarwanda (14.6k) and Russian (15.3k) ran out of distinct words, and the others took up the slack.
+2. **Extraction:** the clips are decoded to 16 kHz int16 in `data/bank/audio.npy` (6.4 GB). It stays on the training machine.
+3. **Embedding, once per base-model version:** `neg_bank.npz` holds fp16 embeddings plus word and language. **Only this file goes to the server.**
+   - Each clip is embedded **with the same augmentation as the user's positives**, at a random position in the window. With clean negatives and noisy positives, the head would learn "noisy = wake word".
 4. **Wake-word exclusion at fine-tune time.** If the user's wake word exists in MSWC, its clips would fight the positives. Drop bank clips that:
    - are the same word as the full wake-word label (normalized). This is the only use of the text label.
    - are very close to the user's prototype embedding. This catches spelling variants and the same word in other languages.
@@ -334,8 +345,14 @@ Target: under 2 minutes on CPU. No GPU on the server.
    - **hard negatives:** the MSWC words closest to the user's prototype;
    - **partial wake words:** the first or last 40–70% of each recording;
    - the user's own "other speech" and ambience windows.
-3. **Head:** a small MLP on the L2-normalized embedding, trained with class-weighted BCE. The encoder stays frozen.
-4. **Leave-2-out folds:** estimate recall and flag weak recordings. The final head trains on all recordings.
+3. **Scorer (changed in M1): a pushed prototype, not a trained MLP.**
+   - **Prototype:** the mean of the clean enrollment embeddings.
+   - **Push:** subtract 0.5 × the mean of the hardest negatives, then renormalize.
+   - **Score:** `logit = 20 · cos(embedding, direction) + bias`, with the bias putting the sigmoid midpoint between typical augmented positives and the 99.9th-percentile negative. It's one linear layer (`core.model.PrototypeHead`), so the compose step below doesn't change. The encoder stays frozen.
+   - **Why:** on 48 held-out words at 0.5 false accepts/h, the trained MLP head reached 18% recall and the plain prototype 73%. The MLP fits augmentations of only 10 clips, never sees continuous speech, and is overconfident on long-form audio (calibrated thresholds land around 0.99).
+   - **Push strength:** 0.4–0.6 is best (79% recall); 0.8 and above collapses onto the negatives. The MLP head remains available as `FinetuneConfig(scorer="mlp")`.
+   - Augmented positives are still embedded; they set the bias and feed the recall estimate.
+4. **Leave-2-out folds:** estimate recall and flag weak recordings. The final prototype uses all recordings.
 5. **Calibration:** run the head plus the §4.3 smoothing over `longform_cache.npz` with the gate off, and pick the threshold that meets `target_fa_per_hour` (default 0.5/h).
 6. **Compose:**
    - Export the head from torch as a tiny ONNX graph.
@@ -398,7 +415,7 @@ Target: under 2 minutes on CPU. No GPU on the server.
 | # | Deliverable | Done when |
 |---|---|---|
 | **M0** ✅ | uv project + pnpm workspace; `core` frontend + stub encoder export; graph checker; pinned Silero VAD; `runtime/SPEC.md`; Python + JS detectors; golden vectors; CI (pytest, vitest with onnxruntime-web wasm in Node, Playwright) | **Done 2026-10-05.** pytest 33/33, vitest 21/21, Playwright 4/4 (Chromium + Firefox). Identical events in every runtime; VAD matches the official wrapper. |
-| **M1** | `training`: download, prepare, student-only training, few-shot and end-to-end evals, bank, base **v0.1** | Per-language eval numbers recorded. Encoder files pass the dual-runtime tests. |
+| **M1** ✅ | `training`: download, prepare, student-only training, few-shot and end-to-end evals, bank, base **v0.1** | **Done 2026-10-06.** Few-shot (10 clips) recall@1%FAR **95.1%** on unseen words. End to end **77% recall at 0.5 false accepts/h** (82% at 1/h), with calibration holding out of sample (0.60/h measured). Encoder parity: wasm vs Python 1.3e-7 (fp32), int8 bit-identical. See §12.1. |
 | **M2** | `server`: uploads + checks, jobs, quick mode, calibration, compose, verify, SSE | A curl-driven run produces a bundle that passes the dual-runtime tests |
 | **M3** | `web`: record → review → train → live test → download | The full flow works in Chrome, Firefox and mobile Safari |
 | **M4** | Devices: Pi 4/5 (Python ORT on aarch64), phone browser (wasm) | CPU %, latency and a 24 h real-room false-accept test (TV + speech) measured on each |
@@ -406,6 +423,36 @@ Target: under 2 minutes on CPU. No GPU on the server.
 | **M6** | Quality mode, multi-speaker enrollment, auth, S3, retention policy | — |
 
 M2 and M3 can start right after M0, against the stub encoder, while M1 trains.
+
+### 12.1 M1 results (base model v0.1)
+
+The base model is BC-ResNet (204k parameters, 256-dim embedding), trained for 80k steps of Sub-center ArcFace over 85,258 words in the 12 languages, about 4 h on the RTX 4060 Ti. It lives in `models/base/v0.1/`; `base_model.json` holds every number below.
+
+**Few-shot, on held-out words** (300 words × 40 clips per language, recall at 1% false alarms per clip):
+- **Mean:** 1 clip 82.4%, 5 clips 93.9%, 10 clips **95.1%**. EER at 10 clips: 1.9%.
+- **Per language, 10 clips:** ru 98.6, ca 98.3, de 97.9, eu 97.7, it 97.3, pl 97.3, cy 95.2, es 95.0, en 94.1, fr 93.8, fa 93.6, rw 82.5.
+
+**End to end** (`eval_e2e`, 240 held-out words). Enrollment is 10 clips; testing uses other speakers and streaming 2-of-3 detection.
+
+| Language | rw | en | fa | es | fr | cy | it | eu | pl | ca | ru | de | **mean** |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Recall @ 0.5 FA/h | 46 | 68 | 72 | 72 | 74 | 79 | 81 | 85 | 85 | 86 | 87 | 91 | **77** |
+
+- **Other operating points:** 82% at 1 false accept/h, 85% at 2/h.
+- **Out-of-sample false accepts:** 0.60, 1.14 and 2.28 per hour for targets of 0.5, 1 and 2. Calibration slightly undershoots, by about 15–20%.
+- **Per word:** median 84%; 59% of words reach at least 80%, and 12% fall below 50%.
+- **Word length matters most:** 50% recall for words of 4 characters or fewer, 73% for 5–6, 83% for 7–8, 87% for 9 or more.
+- **More enrollment speakers help:** 71% with at most 3 speakers, 85% with 7–10.
+- **This test is cross-speaker,** which is harder than a user detecting their own voice.
+- **The scorer matters more than anything else measured:** the MLP head planned for §9.3 gave **20%** on the same protocol. §9.3 explains why it was replaced.
+
+**int8:** embeddings agree with fp32 at cosine 0.98 on average. Few-shot recall with 10 clips drops 95.6 → 95.1, and with 1 clip 84.6 → 82.8. Whether int8 holds at the 0.5 FA/h operating point is the M2 verification step's job.
+
+**Next levers (v0.2)**, roughly by expected value:
+1. Phrase classes, so multi-word wake words fit the 1.5 s window and train as single units.
+2. Partial-FC plus more steps: 2.8 epochs is short for 85k classes, and accuracy was still rising at the end.
+3. Better Kinyarwanda coverage.
+4. In the app, guide users toward long wake words and several voices at enrollment.
 
 ## 13. Decisions
 
@@ -417,6 +464,7 @@ M2 and M3 can start right after M0, against the stub encoder, while M1 trains.
 - **Layout:** flat Python packages (`core/`, `training/`, `server/`, `runtime/`), one uv project.
 - **Teacher:** XLS-R 300M (Apache-2.0), frozen on the local GPU.
 - **Default export:** one merged file per wake word.
+- **Quick-mode scorer:** the pushed prototype (§9.3), replacing the MLP head: 77% vs 20% recall at 0.5 FA/h.
 
 **Still open:**
 - Also export a shared `encoder.onnx` plus a small `head.onnx` per word, for devices that run several wake words?
@@ -428,7 +476,7 @@ M2 and M3 can start right after M0, against the stub encoder, while M1 trains.
 - **False accepts with about 10 samples.** These may miss the target rate. The calibration report shows it honestly, and a second-stage verifier can be added to the runtime later.
 - **Always-on listening in a phone browser** only works while the page is in the foreground; iOS Safari stops the mic when the screen locks. True background listening needs a native app, and the ONNX contract keeps that possible.
 - **Mismatch between the recording mic and the device mic.** Mitigated by EQ augmentation and by recording on the target device.
-- **Languages with little data** (cy, eu, pl, ru: about 110–140 h each) may enroll less reliably. `eval_fewshot` and `eval_e2e` report results per language, so this will be visible.
+- **Languages with little data** (cy, eu, pl, ru: about 110–140 h each) turned out fine in v0.1 (79–87% end to end). The weak one is **Kinyarwanda (46%)**, despite 422 h: it has only 322 speakers, and its words are long and agglutinative. Short wake words (4 characters or fewer) are weak in every language, at about 50%.
 - **Privacy.** Voice recordings are personal data under GDPR. Plan a retention policy and a delete endpoint (§9.1).
 
 ## Sources

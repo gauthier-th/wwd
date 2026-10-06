@@ -22,6 +22,36 @@ class EncoderConfig:
     sub_bands: int = 5
     dropout: float = 0.1
     attention: bool = True
+    # SpecAugment on the PCEN features, training only (a no-op in eval and in exports).
+    freq_masks: int = 2
+    freq_mask_width: int = 6
+    time_masks: int = 2
+    time_mask_width: int = 15
+
+
+class SpecAugment(nn.Module):
+    def __init__(self, config: EncoderConfig) -> None:
+        super().__init__()
+        self.config = config
+
+    def _mask(self, x: torch.Tensor, dim: int, count: int, width: int) -> torch.Tensor:
+        n, size = x.shape[0], x.shape[dim]
+        pos = torch.arange(size, device=x.device)[None]
+        for _ in range(count):
+            w = torch.randint(0, width + 1, (n, 1), device=x.device)
+            start = (torch.rand(n, 1, device=x.device) * (size - w + 1)).long()
+            hit = (pos >= start) & (pos < start + w)  # [N, size]
+            shape = [n, 1, 1, 1]
+            shape[dim] = size
+            x = x.masked_fill(hit.view(shape), 0.0)
+        return x
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # [N, 1, F, T]
+        if not self.training:
+            return x
+        c = self.config
+        x = self._mask(x, 2, c.freq_masks, c.freq_mask_width)
+        return self._mask(x, 3, c.time_masks, c.time_mask_width)
 
 
 class SubSpectralNorm(nn.Module):
@@ -135,6 +165,7 @@ class Encoder(nn.Module):
             (4, 1, 8),
         ]
         self.frontend = Frontend()
+        self.spec_augment = SpecAugment(config)
         self.head = nn.Sequential(
             nn.Conv2d(1, 2 * c, 5, stride=(2, 1), padding=2, bias=False),
             nn.BatchNorm2d(2 * c),
@@ -160,6 +191,6 @@ class Encoder(nn.Module):
         self.project = nn.Linear(tail_dim, config.embedding_dim)
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
-        x = self.tail(self.blocks(self.head(self.frontend(audio))))  # [N, D, 1, T]
+        x = self.tail(self.blocks(self.head(self.spec_augment(self.frontend(audio)))))  # [N, D, 1, T]
         x = self.attention(x.squeeze(2).transpose(1, 2))
         return l2_normalize(self.project(self.pool(x)))
