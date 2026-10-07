@@ -16,6 +16,17 @@ jobs:
       - run: uv run lint-imports
       - run: uv run pytest -q
 
+  runtime-arm64:
+    name: Python runtime on aarch64 (ARM kernels, as on a Raspberry Pi)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11" # Raspberry Pi OS
+      - run: pip install -r runtime/requirements.txt pytest # the device kit's own install
+      - run: python -m pytest -q runtime/tests
+
   js:
     name: JS runtime (onnxruntime-web wasm under Node)
     runs-on: ubuntu-latest

@@ -12,6 +12,7 @@ export type ToWorker =
       vad: ArrayBuffer | null;
       gate: boolean;
       overrides?: Partial<DetectorConfig>;
+      clips?: { beforeS: number; afterS: number }; // send the audio around each detection
     }
   | { type: "audio"; samples: Float32Array } // 16 kHz, any length
   | { type: "port"; port: MessagePort } // direct line from the capture worklet
@@ -19,7 +20,16 @@ export type ToWorker =
 
 export type FromWorker =
   | { type: "ready"; generation: number; config: DetectorConfig; metadata: Record<string, string> }
-  | { type: "ticks"; generation: number; ticks: Tick[]; events: WakeEvent[]; samples: number }
+  | {
+      type: "ticks";
+      generation: number;
+      ticks: Tick[];
+      events: WakeEvent[];
+      samples: number;
+      processMs: number[]; // per tick: VAD frames + wake model, in this worker
+      queued: number; // chunks waiting behind this one: > 0 means falling behind
+    }
+  | { type: "clip"; generation: number; tick: number; samples: Float32Array }
   | { type: "error"; message: string };
 
 // Messages between the main thread and recorder.worker.ts.

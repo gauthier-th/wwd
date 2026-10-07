@@ -75,6 +75,20 @@ class Training(SQLModel, table=True):
     finished_at: datetime | None = None
 
 
+class DeviceRun(SQLModel, table=True):
+    """A measurement made on a device with a training's files (PLAN.md M4): a benchmark (its
+    results in `data`) or a field test (a runtime/fieldlog.py directory in storage)."""
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    wakeword_id: str = Field(index=True)
+    training_id: str = Field(index=True)
+    kind: str  # benchmark | fieldtest
+    data: dict | None = Field(default=None, sa_column=Column(JSON))
+    finished: bool = False
+    created_at: datetime = Field(default_factory=now)
+    updated_at: datetime = Field(default_factory=now)
+
+
 class TrainingEvent(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     training_id: str = Field(index=True)

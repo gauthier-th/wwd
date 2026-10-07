@@ -604,6 +604,33 @@ input[type="range"] {
   flex: none;
 }
 
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: 6px 8px 6px 0;
+  border-top: 1px solid var(--border);
+}
+
+.table th {
+  color: var(--muted);
+  font-weight: 600;
+  border-top: none;
+}
+
+code {
+  font-size: 0.9em;
+  background: var(--surface-2);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;

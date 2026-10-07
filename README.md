@@ -62,5 +62,14 @@ python -m runtime.listen --record take.wav              # a take from the device
 
 `/harness.html` in the web app runs the M0 runtime checks (golden parity, microphone pipeline).
 
+## Measure a device (M4)
+
+- **Raspberry Pi or any Python host:** `scripts/pack_runtime.sh bundle.zip` builds
+  `dist/wwd-runtime.tar.gz`; [runtime/README.md](runtime/README.md) walks through parity tests,
+  `python -m runtime.bench` and a 24 h field test (`runtime.listen --log`, then `runtime.fieldreport`).
+- **Phone:** open a finished model in the app, then "Measure this device". On Android over USB,
+  `adb reverse tcp:8000 tcp:8000` lets the phone open `http://localhost:8000` with the microphone.
+- **aarch64 without a Pi:** `scripts/test_aarch64.sh` (needs `qemu-user-static`).
+
 Regenerate the golden test data (stub models, expected values) with
 `uv run --extra training python -m scripts.make_golden`.

@@ -9,6 +9,7 @@ import type { FromRecorder, FromWorker, RecorderStatus, ToRecorder, ToWorker } f
 export interface DetectorOptions {
   gate?: boolean;
   overrides?: Partial<DetectorConfig>;
+  clips?: { beforeS: number; afterS: number };
 }
 
 export interface DetectorHandle {
@@ -44,7 +45,7 @@ export async function startDetector(
         else return;
         off();
       });
-      send({ type: "init", generation, model: m, vad: v, gate: o.gate ?? true, overrides: o.overrides });
+      send({ type: "init", generation, model: m, vad: v, gate: o.gate ?? true, overrides: o.overrides, clips: o.clips });
     });
   const ready = await init(0, model, vad, options);
   const handle: DetectorHandle = {

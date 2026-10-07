@@ -27,7 +27,8 @@ from runtime.vad import SileroVad
 from server import audio
 from server.basemodel import VAD_FILE, BaseModels
 from server.bundle import ARTIFACTS, retargeted_bundle
-from server.db import Sample, Training, TrainingEvent, Upload, WakeWord, make_engine
+from server.db import DeviceRun, Sample, Training, TrainingEvent, Upload, WakeWord, make_engine
+from server.device import device_routes
 from server.languages import LANGUAGES
 from server.settings import Settings
 from server.storage import LocalStorage
@@ -216,7 +217,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             get_wakeword(s, wid)
             tids = s.exec(select(Training.id).where(Training.wakeword_id == wid)).all()
             s.execute(delete(TrainingEvent).where(col(TrainingEvent.training_id).in_(tids)))
-            for table in (Training, Sample, Upload):
+            for table in (DeviceRun, Training, Sample, Upload):
                 s.execute(delete(table).where(table.wakeword_id == wid))
             s.execute(delete(WakeWord).where(WakeWord.id == wid))
             s.commit()
@@ -397,6 +398,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         name = f"wake-word-{fa_per_hour:g}fa.zip"
         return Response(data, media_type="application/zip",
                         headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    device_routes(app, session, storage)
 
     if settings.web_dist is not None and (settings.web_dist / "index.html").exists():
         app.mount("/", SpaFiles(directory=settings.web_dist, html=True), name="web")

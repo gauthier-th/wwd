@@ -1,9 +1,9 @@
-import { useState } from "react";
 import { Link, useParams } from "react-router";
 
 import { artifactUrl, bundleUrl, type Report, type Training } from "../api";
-import { LiveTest, type ModelKind } from "../components/LiveTest";
-import { falseAlarmRate, hours, pct, seconds } from "../format";
+import { DetectorSettings, useDetectorChoice } from "../components/DetectorSettings";
+import { LiveTest } from "../components/LiveTest";
+import { hours, pct, seconds } from "../format";
 import { useTraining, useTrainingEvents, useWakeWord } from "../hooks";
 import { Steps } from "./WakeWord";
 
@@ -85,11 +85,8 @@ function Progress({ training, events }: { training: Training; events: { stage: s
 }
 
 function Done({ training, report }: { training: Training; report: Report }) {
-  const points = report.operating_points;
-  const [index, setIndex] = useState(() => Math.max(0, points.findIndex((p) => p.fa_per_hour === report.target_fa_per_hour)));
-  const [kind, setKind] = useState<ModelKind>("fp32");
-  const [gate, setGate] = useState(true);
-  const point = points[index];
+  const settings = useDetectorChoice(report);
+  const { point, kind, gate } = settings.choice;
   const verify = report.verification[kind];
   const cv = report.cross_validation;
   const weak = cv?.per_recording.filter((r) => r.weak).length ?? 0;
@@ -132,32 +129,13 @@ function Done({ training, report }: { training: Training; report: Report }) {
 
       <section className="card" data-testid="settings">
         <h2>Try it</h2>
-        <div className="field">
-          <label htmlFor="sensitivity">Sensitivity</label>
-          <input id="sensitivity" type="range" min={0} max={points.length - 1} step={1} value={index}
-                 onChange={(e) => setIndex(Number(e.target.value))} data-testid="sensitivity"
-                 aria-valuetext={`about ${falseAlarmRate(point.fa_per_hour)} false alarms`} />
-          <div className="row small muted">
-            <span>Fewer false alarms</span>
-            <span className="spacer" />
-            <span>More sensitive</span>
-          </div>
-          <div className="small">
-            About <strong>{falseAlarmRate(point.fa_per_hour)}</strong> false alarm
-            {point.fa_per_hour > 1 ? "s" : ""} in conversation (threshold {point[kind].threshold.toFixed(3)}).
-          </div>
-        </div>
-        <div className="row" style={{ margin: "12px 0" }}>
-          <div className="segmented" role="group" aria-label="Model file">
-            <button type="button" aria-pressed={kind === "fp32"} onClick={() => setKind("fp32")}>Full</button>
-            <button type="button" aria-pressed={kind === "int8"} onClick={() => setKind("int8")}>Small (int8)</button>
-          </div>
-          <label className="check small">
-            <input type="checkbox" checked={gate} onChange={(e) => setGate(e.target.checked)} data-testid="gate" />
-            Only listen while someone speaks
-          </label>
-        </div>
+        <DetectorSettings state={settings} />
         <LiveTest training={training} point={point} kind={kind} gate={gate} />
+        <p className="small" style={{ marginTop: 12 }}>
+          <Link to={`/w/${training.wakeword_id}/t/${training.id}/device`} data-testid="device-link">
+            Measure this device: benchmark and 24 h field test →
+          </Link>
+        </p>
       </section>
 
       <section className="card" data-testid="download">

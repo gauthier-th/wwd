@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { createBrowserRouter, RouterProvider } from "react-router";
 
 import { ApiError } from "./api";
+import { DevicePage } from "./pages/Device";
 import { ErrorPage, Layout } from "./pages/Layout";
 import { Home } from "./pages/Home";
 import { TrainingPage } from "./pages/Training";
@@ -28,6 +29,7 @@ const router = createBrowserRouter([
       { path: "/", element: <Home /> },
       { path: "/w/:wid", element: <WakeWordPage /> },
       { path: "/w/:wid/t/:tid", element: <TrainingPage /> },
+      { path: "/w/:wid/t/:tid/device", element: <DevicePage /> },
     ],
   },
 ]);
