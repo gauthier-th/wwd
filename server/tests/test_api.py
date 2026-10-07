@@ -13,11 +13,10 @@ from fastapi.testclient import TestClient
 
 from core.export import check_graph, read_metadata
 from runtime import Detector
-from runtime.vad import SileroVad
 from server import audio
 from server.api import create_app
-from server.basemodel import VAD_FILE
 from server.bundle import ARTIFACTS, BUNDLE_FILES
+from server.tests.tiny_base import take
 from server.worker import Worker
 
 
@@ -33,14 +32,6 @@ def client(app):
 
 def wav(x: np.ndarray) -> bytes:
     return audio.encode_wav(x)
-
-
-def take(speech: np.ndarray, n: int = 6) -> np.ndarray:
-    vad = SileroVad(VAD_FILE)
-    word = next(c for c in audio.split_positives(speech, vad) if c.accepted and c.speech_s < 0.9)
-    gap = np.zeros(int(0.8 * audio.SR), np.float32)
-    rng = np.random.default_rng(0)
-    return np.concatenate([gap] + [x for _ in range(n) for x in (word.audio * rng.uniform(0.2, 0.9), gap)])
 
 
 def upload(client, wid, kind, data, name="take.wav"):
@@ -61,6 +52,12 @@ def sse(client, tid) -> list[tuple[str, dict]]:
                 events.append((current["event"], current["data"]))
                 current = {}
     return events
+
+
+def read_metadata_bytes(data: bytes) -> dict[str, str]:
+    import onnx
+
+    return {p.key: p.value for p in onnx.load_from_string(data).metadata_props}
 
 
 def test_languages_and_base_models(client):
@@ -161,6 +158,28 @@ def test_full_flow(client, app, settings, speech, noise):
         assert sorted(zf.namelist()) == sorted(f"wake-word/{n}" for n in BUNDLE_FILES)
         assert zf.read("wake-word/model.onnx") == files["model.onnx"]
 
+    # another operating point: same files, only the thresholds in their metadata change
+    points = report["operating_points"]
+    assert [p["fa_per_hour"] for p in points] == [0.1, 0.25, 0.5, 1.0, 2.0, 5.0]
+    for kind in ("fp32", "int8"):
+        thr = [p[kind]["threshold"] for p in points]
+        assert thr == sorted(thr, reverse=True)  # more false accepts allowed, lower threshold
+        assert next(p for p in points if p["fa_per_hour"] == 2.0)[kind]["threshold"] == thresholds[kind]
+    r = client.get(f"/api/trainings/{tid}/bundle.zip", params={"fa_per_hour": 0.1})
+    assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        for kind, name in (("fp32", "model.onnx"), ("int8", "model.int8.onnx")):
+            path.write_bytes(zf.read(f"wake-word/{name}"))
+            meta = read_metadata(path)
+            assert float(meta["threshold"]) == points[0][kind]["threshold"]
+            assert {k: v for k, v in meta.items() if k != "threshold"} == {
+                k: v for k, v in read_metadata_bytes(files[name]).items() if k != "threshold"}
+        retargeted = json.loads(zf.read("wake-word/model.json"))
+        assert retargeted["threshold"] == str(points[0]["fp32"]["threshold"])
+        assert retargeted["evaluation"]["target_fa_per_hour"] == 0.1
+        assert "0.1 false accepts per hour" in zf.read("wake-word/README.md").decode()
+    assert client.get(f"/api/trainings/{tid}/bundle.zip?fa_per_hour=0.3").status_code == 422
+
     assert client.delete(f"/api/wakewords/{wid}").status_code == 204
     assert client.get(f"/api/wakewords/{wid}").status_code == 404
     assert client.get(f"/api/trainings/{tid}").status_code == 404
@@ -202,7 +221,7 @@ def test_release_without_int8_cache_shares_the_fp32_threshold(models_dir, tmp_pa
     del manifest["files"]["longform_cache.int8.npz"]
     (old / "base" / "tiny" / "base_model.json").write_text(json.dumps(manifest))
     settings = Settings(data_dir=tmp_path / "server", models_dir=old, verify_workers=2,
-                        finetune={"augment_per_clip": 4, "partial_per_clip": 2,
+                        web_dist=None, finetune={"augment_per_clip": 4, "partial_per_clip": 2,
                                   "hard_negatives": 50, "random_negatives": 200})
     app = create_app(settings)
     client = TestClient(app)
@@ -213,3 +232,35 @@ def test_release_without_int8_cache_shares_the_fp32_threshold(models_dir, tmp_pa
     cal = client.get(f"/api/trainings/{tid}").json()["report"]["calibration"]
     assert not cal["int8"]["own_cache"]
     assert cal["int8"]["threshold"] == cal["fp32"]["threshold"]
+
+
+def test_serves_the_built_app_next_to_the_api(settings, tmp_path):
+    from dataclasses import replace
+
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html><title>app</title>")
+    (dist / "assets" / "app.js").write_text("console.log(1)")
+    client = TestClient(create_app(replace(settings, web_dist=dist)))
+    for path in ("/", "/w/abc", "/w/abc/t/def"):  # client-side routes get the app
+        r = client.get(path)
+        assert r.status_code == 200 and "<title>app</title>" in r.text, path
+    assert client.get("/assets/app.js").text == "console.log(1)"
+    assert client.get("/assets/missing.js").status_code == 404
+    assert client.get("/api/health").json()["status"] == "ok"
+    assert client.get("/api/nope").status_code == 404
+
+
+def test_worker_thread_runs_jobs_inside_the_api_process(settings, speech):
+    import time
+    from dataclasses import replace
+
+    with TestClient(create_app(replace(settings, worker_thread=True))) as client:
+        wid = client.post("/api/wakewords", json={"name": "x", "language": "en"}).json()["id"]
+        upload(client, wid, "positive", wav(take(speech, 3)))
+        tid = client.post(f"/api/wakewords/{wid}/trainings", json={}).json()["id"]
+        deadline = time.time() + 120
+        while client.get(f"/api/trainings/{tid}").json()["status"] not in ("done", "failed"):
+            assert time.time() < deadline
+            time.sleep(0.2)
+        assert client.get(f"/api/trainings/{tid}").json()["status"] == "done"

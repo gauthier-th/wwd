@@ -24,21 +24,43 @@ Base models are read from `models/base/<version>/` (`WWD_MODELS`, `WWD_BASE_VERS
 database and recordings go to `data/server/` (`WWD_SERVER_DATA`). `scripts/m2_smoke.sh [lang]`
 drives a whole run with curl against a real base model and checks the bundle in both runtimes.
 
+## Web app
+
+```sh
+pnpm --filter @wwd/web dev                         # http://localhost:5173, /api proxied to :8000
+```
+
+Or build it once and let the API serve it, so the app and the API share one origin:
+
+```sh
+pnpm --filter @wwd/web build
+WWD_WORKER_THREAD=1 uv run --extra server uvicorn server.api:app   # app + API + worker on :8000
+```
+
+Browsers only open the microphone on `https://` or `localhost`. To try it on a phone, put the
+server behind HTTPS, for example `cloudflared tunnel --url http://localhost:8000` or a mkcert
+certificate trusted by the phone.
+
 ## Tests
 
 ```sh
 uv run pytest                 # core, server (tiny base model) + Python runtime (golden parity)
 uv run ruff check . && uv run lint-imports
 pnpm --filter @wwd/runtime test        # JS runtime, onnxruntime-web wasm under Node
-pnpm --filter @wwd/web test:e2e        # Chromium + Firefox: Worker + AudioWorklet
+pnpm --filter @wwd/web test            # app unit tests
+pnpm --filter @wwd/web test:e2e        # Chromium, Firefox, WebKit (iPhone): the app against a real
+                                       # API on a tiny base model, plus runtime parity and the mic
 ```
 
 ## Run a model
 
 ```sh
-python -m runtime.listen model.onnx --vad runtime/assets/silero_vad_16k_op15.onnx
-pnpm --filter @wwd/web dev    # then open /harness.html
+python -m runtime.listen model.onnx --vad vad.onnx      # files from the downloaded bundle
+python -m runtime.listen --record take.wav              # a take from the device's own mic,
+                                                        # for the app's "Import a file instead"
 ```
+
+`/harness.html` in the web app runs the M0 runtime checks (golden parity, microphone pipeline).
 
 Regenerate the golden test data (stub models, expected values) with
 `uv run --extra training python -m scripts.make_golden`.

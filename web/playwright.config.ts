@@ -9,13 +9,23 @@ export default defineConfig({
   testDir: "e2e",
   timeout: 180_000,
   reporter: [["list"]],
-  // Tests run against the production build, so asset paths (onnx, wasm, worklet) are covered.
-  webServer: {
-    command: "pnpm build && pnpm preview --port 4173 --strictPort",
-    url: "http://localhost:4173/harness.html",
-    reuseExistingServer: !process.env.CI,
-    timeout: 180_000,
-  },
+  // Tests run against the production build, so asset paths (onnx, wasm, worklet) are covered,
+  // and against a real API on a tiny base model (e2e/api-server.sh).
+  webServer: [
+    {
+      command: "bash e2e/api-server.sh",
+      url: "http://127.0.0.1:8766/api/health",
+      reuseExistingServer: !process.env.CI,
+      timeout: 300_000,
+    },
+    {
+      command: "pnpm build && pnpm preview --port 4173 --strictPort",
+      url: "http://localhost:4173/harness.html",
+      env: { WWD_API: "http://127.0.0.1:8766" },
+      reuseExistingServer: !process.env.CI,
+      timeout: 180_000,
+    },
+  ],
   use: { baseURL: "http://localhost:4173" },
   projects: [
     {
@@ -31,6 +41,12 @@ export default defineConfig({
           ],
         },
       },
+    },
+    {
+      // Mobile Safari's engine at phone size, with touch. Playwright's WebKit has no fake audio
+      // device on Linux, so microphone steps are skipped there (see e2e specs).
+      name: "webkit",
+      use: { ...devices["iPhone 15"], permissions: ["microphone"] },
     },
     {
       name: "firefox",

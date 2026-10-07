@@ -14,3 +14,6 @@ web/playwright-report/
 # Large local artifacts (see PLAN.md §5)
 data/
 models/
+
+# web end-to-end test data (tiny base model, fixtures, database)
+web/.e2e/

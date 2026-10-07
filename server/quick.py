@@ -35,6 +35,9 @@ from server.bundle import write_bundle
 from server.settings import Settings
 
 RECALL_COPIES = 10  # augmented copies of each held-out recording in the fold recall estimate
+# False-accept rates every file is also calibrated for: the app's sensitivity slider picks
+# one, and only the metadata of the downloaded files changes (PLAN.md §10).
+OPERATING_POINTS = (0.1, 0.25, 0.5, 1.0, 2.0, 5.0)
 PARITY_TICKS = 128
 MODEL_FILES = {"fp32": "model.onnx", "int8": "model.int8.onnx"}
 
@@ -173,14 +176,23 @@ def run(base: BaseModel, job: Job, out: Path, settings: Settings, progress: Prog
     result = fit_head(emb, base.bank, job.wake_word, job.language, cfg)
     caches = {"fp32": base.cache_embeddings, "int8": base.cache_int8_embeddings}
     calibration: dict = {"hours": base.cache.hours, "target_fa_per_hour": job.target_fa_per_hour}
+    targets = sorted({*OPERATING_POINTS, job.target_fa_per_hour})
+    points: list[dict] = [{"fa_per_hour": t} for t in targets]
     for kind, cache_emb in caches.items():
         if cache_emb is None:  # a release without longform_cache.int8.npz: share fp32's
             calibration[kind] = {**calibration["fp32"], "own_cache": False}
+            for point in points:
+                point[kind] = point["fp32"]
             continue
-        thr, fa = calibrate(head_scores(result.head, cache_emb), base.cache,
-                            job.target_fa_per_hour, det, ignore=ignore)
-        calibration[kind] = {"threshold": thr, "fa_per_hour": fa,
-                             "target_met": fa <= job.target_fa_per_hour, "own_cache": True}
+        scores = head_scores(result.head, cache_emb)
+        for point in points:
+            thr, fa = calibrate(scores, base.cache, point["fa_per_hour"], det, ignore=ignore)
+            point[kind] = {"threshold": thr, "calibration_fa_per_hour": fa}
+        main = next(p for p in points if p["fa_per_hour"] == job.target_fa_per_hour)[kind]
+        calibration[kind] = {"threshold": main["threshold"],
+                             "fa_per_hour": main["calibration_fa_per_hour"],
+                             "target_met": main["calibration_fa_per_hour"] <= job.target_fa_per_hour,
+                             "own_cache": True}
     step("composing", 0.55, "Composing ONNX files")
 
     created = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -226,6 +238,7 @@ def run(base: BaseModel, job: Job, out: Path, settings: Settings, progress: Prog
         "threshold": calibration["fp32"]["threshold"],
         "target_fa_per_hour": job.target_fa_per_hour,
         "calibration": calibration,
+        "operating_points": points,
         "cross_validation": folds,
         "verification": verify,
         "finetune": result.report,

@@ -1,6 +1,6 @@
 # Few-shot wake-word trainer: plan
 
-Last updated: 2026-10-07 (M2 done: fine-tuning server)
+Last updated: 2026-10-07 (M3 done: web app)
 
 ## 1. Goal and scope
 
@@ -37,7 +37,7 @@ A user records a few examples of a wake word in the browser. The server fine-tun
 | 2 | ✅ **Hugging Face account + read token**: after uv, run `uvx --from huggingface_hub hf auth login` | Only you can create the account. MSWC isn't gated and anonymous downloads work, but about 104 GB anonymously risks rate limits. |
 | 3 | ✅ **Large downloads** (about 135 GB): done by `training.download`, resumed once after an interruption | Your bandwidth and your timing |
 | 4 | ✅ Not needed on this machine: Chromium and Firefox ran without extra system libraries. CI installs them with `--with-deps`. | |
-| 5 | **HTTPS for testing on a phone over the LAN** (M3): mkcert with its CA trusted on the phone, or a tunnel such as cloudflared | Needs your devices. Browsers only allow mic access on HTTPS or localhost. |
+| 5 | **HTTPS for testing on a phone over the LAN** (M3's real-device check, M4): mkcert with its CA trusted on the phone, or a tunnel such as `cloudflared tunnel --url http://localhost:8000`. The server serves the app and the API on one origin, so one tunnel is enough. | Needs your devices. Browsers only allow mic access on HTTPS or localhost. |
 | 6 | **Hardware for M4**: a Raspberry Pi 4/5 with a USB mic, and a phone | |
 | 7 | *(M5 only)* Decide whether to rent a larger GPU for the teacher model | Cost decision. See §7. |
 
@@ -337,7 +337,12 @@ GET    /api/trainings/{tid}/events                 SSE: `progress` events, then 
 GET    /api/trainings/{tid}/artifacts/{file}       model.onnx, model.int8.onnx, model.json, vad.onnx,
                                                    LICENSE-silero-vad, ATTRIBUTION.md, README.md,
                                                    report.json, bundle.zip
+GET    /api/trainings/{tid}/bundle.zip?fa_per_hour=x   the bundle at another operating point (M3):
+                                                   same files, only the thresholds in the metadata change
 ```
+
+- **The built web app** is served at `/` when `web/dist` exists (`WWD_WEB_DIST`), with `index.html` for client-side routes. The app and the API then share one origin, so a phone needs a single HTTPS tunnel.
+- **`WWD_WORKER_THREAD=1`** runs the worker inside the API process, for development and the end-to-end tests. Production runs `python -m server.worker` separately.
 
 - **Jobs:** `POST …/trainings` snapshots the sample IDs and queues a `Training` row. `python -m server.worker` claims queued rows one at a time; progress goes to `TrainingEvent` rows, which the SSE endpoint streams (it resumes after `Last-Event-ID`). A worker that starts finds jobs left `running` by a crash and queues them again.
 - **One active training per wake word** (409 otherwise). Quality mode returns 422 until M6.
@@ -397,36 +402,46 @@ Target: under 2 minutes on CPU. No GPU on the server.
 
 ## 10. `web/`: React app
 
-**Stack:** Vite, React, TypeScript, TanStack Query, react-router, and `runtime/js` (onnxruntime-web, wasm).
+**Stack:** Vite, React 19, TypeScript, TanStack Query, react-router 8, and `runtime/js` (onnxruntime-web, wasm). Plain CSS with light and dark tokens, mobile first. Built in M3.
 
-**Audio pipeline:**
-- An AudioWorklet captures the mic and resamples to 16 kHz.
+**Audio pipeline** (`web/src/audio/`):
+- An AudioWorklet captures the mic and resamples it to 16 kHz.
   - Firefox won't connect a mic stream to an AudioContext running at a different sample rate, so the worklet must resample.
-- The worklet sends 512-sample frames to a Web Worker. The Worker runs `runtime/js`, with the VAD on every frame and the wake model on every tick.
+- The worklet sends 512-sample frames straight to a Web Worker:
+  - **live test:** `detector.worker.ts` runs `runtime/js`, with the VAD on every frame and the wake model on every tick;
+  - **recording:** `recorder.worker.ts` runs the same Silero VAD, keeps the audio, and drives the live feedback.
 - The main thread only draws the UI.
+- **Safari:** the AudioContext is created synchronously inside the tap handler. An `await` before it ends the user gesture, and Safari would refuse to start it.
 
 **Settings:**
 - `getUserMedia` with `echoCancellation`, `noiseSuppression` and `autoGainControl` all `false`.
-- Uploads are WAV files encoded in the browser. Don't use MediaRecorder: Opus artifacts would hurt the training data.
-- Vite serves the ORT `.wasm` files (`ort.env.wasm.wasmPaths`).
+- Uploads are 16-bit WAV files encoded in the browser at 16 kHz. Don't use MediaRecorder: Opus artifacts would hurt the training data.
+- Vite serves the ORT `.wasm` files. In development it proxies `/api` to the server (`WWD_API`); in production the server serves the app.
 
 **Flow:**
-1. **Setup:** the wake-word label and the language (one of the 12).
-2. **Record:**
-   - Say the wake word 10 times in one continuous take; the VAD cuts it into clips. There's a live "speech detected" light, and takes with no speech are rejected.
-   - Read a paragraph aloud (about 30 s, in the chosen language).
-   - Record 15 s of room ambience.
-3. **Review:** waveform, playback, quality and outlier badges, re-record.
-4. **Train:** progress over SSE, then recall and false accepts per hour.
+1. **Home** (`/`): the wake-word label and the language, as native names. Wake words of 4 letters or fewer get a warning; M1 measured them at about 50% recall. Wake words made on this device are listed from `localStorage`, since there are no accounts before M6.
+2. **Recordings** (`/w/:id`): three cards. Each has a record button, a live speech light and a level meter, plus **Import a file instead**, for takes recorded elsewhere (`python -m runtime.listen --record` on a Pi).
+   - **The wake word, 10 times in one take.** A live counter shows utterances as the server will cut them: `segments.ts` mirrors `server/audio.py` `speech_regions` and is unit-tested on the same cases. It warns when one utterance runs past 1.3 s, and stops by itself after the 10th utterance and a 0.8 s pause.
+   - **Reading the paragraph** in the chosen language, right-to-left for Persian. Takes with under 2 s of speech are refused in the browser, before any upload.
+   - **15 s of room sound,** stopping by itself.
+   - **Review:** each clip has its waveform, playback, a badge (good, rejected with its reason, unlike the others, or weak after a training) and delete.
+   - **Train:** a checklist (usable recordings, reading, room sound), the false-alarm target and the Train button.
+3. **Training** (`/w/:id/t/:tid`): progress over SSE, as a stage list and a progress bar. You can leave the page; the job continues on the server.
+4. **Results:**
+   - how many recordings the shipped file detects;
+   - false alarms per hour, measured out of sample;
+   - the in-job recall estimate, labelled as rough (§12.2);
+   - the training time;
+   - weak recordings, with a link back to re-record them.
 5. **Test:**
-   - a live graph of the wake score and the VAD probability, with the threshold line and trigger events;
-   - a gate on/off toggle;
-   - a sensitivity slider that rewrites only the metadata.
-6. **Download:** the bundle from §4.1.
+   - a live canvas chart of the wake score and the VAD probability, with the threshold line and detection marks;
+   - fp32 or int8, and a gate on/off toggle;
+   - a **sensitivity slider** over the training's operating points, from 0.1 to 5 false alarms per hour, each with its calibrated threshold per file (§9.3). Changes apply while listening: the detector worker re-initializes without dropping the mic.
+6. **Download:** the bundle at the chosen operating point (`bundle.zip?fa_per_hour=…`), plus the training report.
 
 **Two practical notes:**
-- **Same mic as the device.** Open the app on the phone to record with the mic you'll deploy on. For the Pi, `python -m runtime.listen --record` uploads takes made on the Pi's own mic.
-- **Reading paragraphs.** One per language, 12 in total. Have native speakers check the rw, fa, eu and cy texts. Persian is right-to-left.
+- **Same mic as the device.** Open the app on the phone to record with the mic you'll deploy on. For a Pi, record with `python -m runtime.listen --record take.wav` and import the file.
+- **Reading paragraphs.** One per language, 12 in total. Native speakers should check the rw, fa, eu and cy texts.
 
 ## 11. `runtime/`: detectors
 
@@ -445,7 +460,7 @@ Target: under 2 minutes on CPU. No GPU on the server.
 | **M0** ✅ | uv project + pnpm workspace; `core` frontend + stub encoder export; graph checker; pinned Silero VAD; `runtime/SPEC.md`; Python + JS detectors; golden vectors; CI (pytest, vitest with onnxruntime-web wasm in Node, Playwright) | **Done 2026-10-05.** pytest 33/33, vitest 21/21, Playwright 4/4 (Chromium + Firefox). Identical events in every runtime; VAD matches the official wrapper. |
 | **M1** ✅ | `training`: download, prepare, student-only training, few-shot and end-to-end evals, bank, base **v0.1** | **Done 2026-10-06.** Few-shot (10 clips) recall@1%FAR **95.1%** on unseen words. End to end **77% recall at 0.5 false accepts/h** (82% at 1/h), with calibration holding out of sample (0.60/h measured). Encoder parity: wasm vs Python 1.3e-7 (fp32), int8 bit-identical. See §12.1. |
 | **M2** ✅ | `server`: uploads + checks, jobs, quick mode, calibration, compose, verify, SSE | **Done 2026-10-07.** `scripts/m2_smoke.sh` drives the API with curl against v0.1: a French held-out word, a 10-utterance take, 54 s of training on the CPU, 0 false accepts in 1.4 h of held-out audio, and 48/50 (fp32) and 47/50 (int8) other speakers' utterances detected. Python and wasm runtimes fire identically on the bundle. On 24 held-out words, the shipped fp32 file reaches 80.9% recall at 0.36 false accepts/h out of sample (PyTorch: 79.7%); int8 reaches 78.9% at 0.38/h. See §12.2. |
-| **M3** | `web`: record → review → train → live test → download | The full flow works in Chrome, Firefox and mobile Safari |
+| **M3** ✅ | `web`: record → review → train → live test → download | **Done 2026-10-07, on emulated devices.** The full flow passes in Chromium, Firefox and WebKit (iPhone 15 emulation), in the browser end-to-end tests against a real API. With the real v0.1 model in Chromium, the live test detected 19 of 20 other speakers saying the word. Still to do on your side: a real iPhone over HTTPS (§2, item 5). See §12.3. |
 | **M4** | Devices: Pi 4/5 (Python ORT on aarch64), phone browser (wasm) | CPU %, latency and a 24 h real-room false-accept test (TV + speech) measured on each |
 | **M5** | Base **v1**: XLS-R teacher + distillation | End-to-end metrics beat v0.1. Older user models keep their base version. |
 | **M6** | Quality mode, multi-speaker enrollment, auth, S3, retention policy | — |
@@ -521,6 +536,31 @@ The base model is BC-ResNet (204k parameters, 256-dim embedding), trained for 80
   - **On the shipped files:** 0 false accepts in 1.4 h. Through the Python runtime, 48/50 (fp32) and 47/50 (int8) of other speakers' utterances detected, with no other events.
   - **Parity:** the wasm runtime reproduces the Python runtime on both test files (9/9 tests; events identical; no tick straddles a threshold).
 
+### 12.3 M3 results (web app)
+
+**Automated, in CI** (`web/e2e/app.spec.ts`). The test API runs on a tiny base model (`server/tests/tiny_base.py`) with the worker in-process, and the app is the production build. One test walks the whole flow in each engine:
+1. Create a wake word.
+2. Import a take: the server cuts it into 6 clips.
+3. Record the reading paragraph through the real mic pipeline (Chromium's fake mic plays speech, so the take is kept and the speech light must turn on).
+4. Import the room sound, and train.
+5. Wait for the results.
+6. Listen live, and switch model, gate and sensitivity while listening: ticks must keep flowing, and in Chromium the VAD must hear the speech.
+7. Download the bundle retargeted to 5 false alarms/h, and delete everything.
+
+| Engine | Flow | Runtime golden parity | Mic → worklet → worker |
+|---|---|---|---|
+| Chromium | ✓ 19 s | ✓ (fp32 7.6e-7, int8 1.1e-2) | ✓ 48 kHz → 16 kHz, VAD max 1.00 |
+| Firefox | ✓ 22 s (its tone mic: the app refuses the no-speech take, then a file is imported) | ✓ same values | ✓ |
+| WebKit, iPhone 15 emulation | ✓ 19 s | ✓ same values | ✓ 44.1 kHz → 16 kHz, VAD max 0.79 |
+
+**Real model, by script** (not in CI: it needs v0.1 and the M2 smoke inputs). The API serves the built app (single origin) with the v0.1 base model.
+- **Setup:** enroll the French word "morceaux" through the UI by importing the 10-utterance take, other speech and room sound.
+- **Training:** 55 s. 9 of 10 clips kept; the truncated one was flagged "unlike the others".
+- **On the held-out audio:** 9/9 recordings detected, 0 false alarms in 1.4 h, 86% in-job recall estimate.
+- **Live test:** Chromium's fake mic played other speakers saying the word, 3 s apart, through the 48 kHz → 16 kHz worklet. The fp32 model detected **19 of the 20** utterances in 61 s, with no other detections; the Python runtime got 96% on the same audio in M2.
+
+**Not done:** a real iPhone and a real Android phone over HTTPS. Playwright's WebKit is Safari's engine at phone size, with touch and mock capture devices, but not iOS's audio stack or its permission prompts. That check needs your devices and an HTTPS tunnel (§2, item 5), and belongs with M4's device work.
+
 ## 13. Decisions
 
 **Made:**
@@ -531,6 +571,9 @@ The base model is BC-ResNet (204k parameters, 256-dim embedding), trained for 80
 - **Thresholds per file:** `model.onnx` and `model.int8.onnx` each carry a threshold calibrated on their own scores (§9.3 step 5).
 - **Verification replays the gate:** the gate-on numbers reuse the gate-off scores through the runtime's own `Gate` and `Trigger`, which is exact because the model is stateless (§9.3 step 7).
 - **Outliers stay out of training:** recordings flagged at upload are excluded, and the UI asks for a re-record.
+- **Sensitivity = operating points:** the slider picks a calibrated false-alarm rate (0.1–5/h), not a raw threshold, and a download at another point only rewrites the metadata.
+- **One origin:** the server serves the built app, so phones need one HTTPS tunnel and there's no CORS.
+- **Mobile Safari stand-in in CI:** Playwright WebKit with iPhone emulation. Real devices are checked by hand (M4).
 - **Layout:** flat Python packages (`core/`, `training/`, `server/`, `runtime/`), one uv project.
 - **Teacher:** XLS-R 300M (Apache-2.0), frozen on the local GPU.
 - **Default export:** one merged file per wake word.

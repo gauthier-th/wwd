@@ -100,3 +100,32 @@ def test_encoder_golden():
     got = sess.run(None, {"audio": windows})[0]
     np.testing.assert_allclose(got, enc["embeddings"], atol=TOL["embedding"], rtol=0)
     np.testing.assert_allclose(np.linalg.norm(got, axis=1), 1.0, atol=1e-5)
+
+
+def test_listen_record_writes_a_16k_take(tmp_path):
+    from runtime.listen import record
+
+    class FakeStream:  # sounddevice.InputStream, delivering a 440 Hz tone
+        def __init__(self, **kwargs):
+            assert kwargs["samplerate"] == 16000 and kwargs["channels"] == 1
+            self.t = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, n):
+            block = 0.5 * np.sin(2 * np.pi * 440 * (self.t + np.arange(n)) / 16000)
+            self.t += n
+            return block.astype(np.float32)[:, None], False
+
+    class FakeSd:
+        InputStream = FakeStream
+
+    out = tmp_path / "take.wav"
+    assert record(FakeSd, str(out), 2.5, None) == 0
+    audio, rate = read_wav(out)
+    assert rate == 16000 and len(audio) == 40000
+    assert abs(np.abs(audio).max() - 0.5) < 1e-3

@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated, Literal
 
@@ -15,19 +17,21 @@ import numpy as np
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.sse import EventSourceResponse, ServerSentEvent
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete
 from sqlmodel import Session, col, select
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from runtime.vad import SileroVad
 from server import audio
 from server.basemodel import VAD_FILE, BaseModels
-from server.bundle import ARTIFACTS
+from server.bundle import ARTIFACTS, retargeted_bundle
 from server.db import Sample, Training, TrainingEvent, Upload, WakeWord, make_engine
 from server.languages import LANGUAGES
 from server.settings import Settings
 from server.storage import LocalStorage
-from server.worker import FINAL, training_prefix
+from server.worker import FINAL, Worker, training_prefix
 
 MIN_POSITIVES = 3
 EXTENSIONS = {"audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav", "audio/flac": "flac",
@@ -127,7 +131,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     engine = make_engine(settings.db_url)
     storage = LocalStorage(settings.files_dir)
     bases = BaseModels(settings)
-    app = FastAPI(title="wwd", summary="Few-shot wake-word trainer (PLAN.md §9.1)")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        stop = threading.Event()
+        if settings.worker_thread:
+            worker = Worker(settings, engine=engine)
+            worker.recover()
+
+            def loop() -> None:
+                while not stop.is_set():
+                    if not worker.run_once():
+                        stop.wait(0.5)
+
+            threading.Thread(target=loop, name="wwd-worker", daemon=True).start()
+        yield
+        stop.set()
+
+    app = FastAPI(title="wwd", summary="Few-shot wake-word trainer (PLAN.md §9.1)",
+                  lifespan=lifespan)
     app.state.settings, app.state.engine = settings, engine
 
     def session() -> Session:
@@ -360,7 +381,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return FileResponse(path, filename=name,
                             media_type=media.get(name.rsplit(".", 1)[-1], "application/octet-stream"))
 
+    @app.get("/api/trainings/{tid}/bundle.zip")
+    def bundle_at(tid: str, fa_per_hour: float) -> Response:
+        """The bundle with every model file's threshold set for another of the training's
+        operating points (`report.operating_points`): only metadata changes."""
+        with session() as s:
+            t = s.get(Training, tid)
+            if t is None or t.status != "done":
+                raise HTTPException(404, "no finished training with this id")
+        try:
+            data = retargeted_bundle(storage.path(training_prefix(t.wakeword_id, tid)), t.report,
+                                     fa_per_hour)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        name = f"wake-word-{fa_per_hour:g}fa.zip"
+        return Response(data, media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    if settings.web_dist is not None and (settings.web_dist / "index.html").exists():
+        app.mount("/", SpaFiles(directory=settings.web_dist, html=True), name="web")
     return app
+
+
+class SpaFiles(StaticFiles):
+    """The built app: files as they are, and index.html for client-side routes (/w/<id>...)."""
+
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as e:
+            if e.status_code != 404 or path.startswith("api/") or "." in path.rsplit("/", 1)[-1]:
+                raise
+            return await super().get_response("index.html", scope)
 
 
 def __getattr__(name: str):  # `uvicorn server.api:app` builds the app from the environment

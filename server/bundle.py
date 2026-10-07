@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import io
 import json
 import shutil
 import zipfile
 from pathlib import Path
 
+import onnx
+
+from core.export import set_metadata
 from server.basemodel import VAD_FILE, VAD_LICENSE, sha256
 
 BUNDLE_FILES = ("model.onnx", "model.int8.onnx", "model.json", "vad.onnx", "LICENSE-silero-vad",
@@ -51,8 +57,7 @@ README = """\
 
 Each file carries its own threshold, calibrated for {target} false accepts per hour on
 {calib_hours:.1f} h of long-form audio: **{threshold:.4f}** for `model.onnx`, **{threshold_int8:.4f}**
-for `model.int8.onnx`. On {verify_hours:.1f} h of held-out audio the float32 file measured
-{fa_off:.2f} false accepts per hour with the gate off and {fa_on:.2f} with the gate on.
+for `model.int8.onnx`.{verified}
 
 ## Python (Raspberry Pi, any computer)
 
@@ -73,29 +78,35 @@ The detector logic (ticks, speech gate, smoothing, refractory period) is specifi
 """
 
 
-def write_bundle(out: Path, metadata: dict[str, dict[str, str]], report: dict) -> None:
-    """`metadata` per model kind (fp32, int8): the files differ only in their threshold."""
-    shutil.copyfile(VAD_FILE, out / "vad.onnx")
-    shutil.copyfile(VAD_LICENSE, out / "LICENSE-silero-vad")
+MODELS = {"fp32": "model.onnx", "int8": "model.int8.onnx"}
+
+
+def _texts(metadata: dict[str, dict[str, str]], report: dict, hashes: dict[str, str],
+           target: float) -> dict[str, bytes]:
+    """README.md, ATTRIBUTION.md and model.json for model files with this metadata, whose
+    thresholds were calibrated for `target` false accepts per hour."""
     meta = metadata["fp32"]
-    (out / "ATTRIBUTION.md").write_text(ATTRIBUTION.format(version=meta["base_model_version"]))
-    fp32 = report["verification"]["fp32"]
-    (out / "README.md").write_text(README.format(
-        wake_word=meta["wake_word"], language=meta["language"],
+    verified = ""
+    if target == report["target_fa_per_hour"]:  # verification ran at the trained target only
+        fp32 = report["verification"]["fp32"]
+        verified = (f" On {fp32['hours']:.1f} h of held-out audio the float32 file measured "
+                    f"{fp32['no_gate']['per_hour']:.2f} false accepts per hour with the gate off "
+                    f"and {fp32['gate']['per_hour']:.2f} with the gate on.")
+    readme = README.format(
+        wake_word=meta["wake_word"], language=meta["language"], target=target,
         threshold=float(meta["threshold"]), threshold_int8=float(metadata["int8"]["threshold"]),
-        target=report["target_fa_per_hour"],
-        calib_hours=report["calibration"]["hours"], verify_hours=fp32["hours"],
-        fa_off=fp32["no_gate"]["per_hour"], fa_on=fp32["gate"]["per_hour"]))
+        calib_hours=report["calibration"]["hours"], verified=verified)
     model_json = {
         **meta,  # the float32 file's metadata; each file's own threshold is under "files"
         "files": {
-            "model.onnx": {"sha256": sha256(out / "model.onnx"), "threshold": meta["threshold"]},
-            "model.int8.onnx": {"sha256": sha256(out / "model.int8.onnx"),
+            "model.onnx": {"sha256": hashes["model.onnx"], "threshold": meta["threshold"]},
+            "model.int8.onnx": {"sha256": hashes["model.int8.onnx"],
                                 "threshold": metadata["int8"]["threshold"]},
-            "vad.onnx": {"sha256": sha256(out / "vad.onnx")},
+            "vad.onnx": {"sha256": hashes["vad.onnx"]},
         },
         "evaluation": {
-            "target_fa_per_hour": report["target_fa_per_hour"],
+            "target_fa_per_hour": target,
+            "trained_target_fa_per_hour": report["target_fa_per_hour"],
             "calibration_fa_per_hour": {k: report["calibration"][k]["fa_per_hour"]
                                         for k in ("fp32", "int8")},
             "verification": {k: {"hours": v["hours"], "fa_per_hour_gate_off": v["no_gate"]["per_hour"],
@@ -104,10 +115,55 @@ def write_bundle(out: Path, metadata: dict[str, dict[str, str]], report: dict) -
             "cross_validation_recall": (report["cross_validation"] or {}).get("recall_noisy"),
         },
     }
-    (out / "model.json").write_text(json.dumps(model_json, indent=2, ensure_ascii=False) + "\n")
-    (out / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
-    tmp = out / "bundle.zip.tmp"
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+    return {
+        "README.md": readme.encode(),
+        "ATTRIBUTION.md": ATTRIBUTION.format(version=meta["base_model_version"]).encode(),
+        "model.json": (json.dumps(model_json, indent=2, ensure_ascii=False) + "\n").encode(),
+    }
+
+
+def _zip(files: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for name in BUNDLE_FILES:
-            zf.write(out / name, f"wake-word/{name}")
+            zf.writestr(f"wake-word/{name}", files[name])
+    return buf.getvalue()
+
+
+def write_bundle(out: Path, metadata: dict[str, dict[str, str]], report: dict) -> None:
+    """`metadata` per model kind (fp32, int8): the files differ only in their threshold."""
+    shutil.copyfile(VAD_FILE, out / "vad.onnx")
+    shutil.copyfile(VAD_LICENSE, out / "LICENSE-silero-vad")
+    hashes = {name: sha256(out / name) for name in ("model.onnx", "model.int8.onnx", "vad.onnx")}
+    for name, data in _texts(metadata, report, hashes, report["target_fa_per_hour"]).items():
+        (out / name).write_bytes(data)
+    (out / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
+    files = {name: (out / name).read_bytes() for name in BUNDLE_FILES}
+    tmp = out / "bundle.zip.tmp"
+    tmp.write_bytes(_zip(files))
     tmp.replace(out / "bundle.zip")
+
+
+def retargeted_bundle(out: Path, report: dict, fa_per_hour: float) -> bytes:
+    """The bundle at another of the training's operating points: only the threshold in each
+    model file's metadata (and the texts describing it) changes."""
+    point = next((p for p in report["operating_points"]
+                  if abs(p["fa_per_hour"] - fa_per_hour) < 1e-9), None)
+    if point is None:
+        raise ValueError(f"no operating point at {fa_per_hour} false accepts/h")
+    files = {name: (out / name).read_bytes()
+             for name in ("vad.onnx", "LICENSE-silero-vad")}
+    metadata = {}
+    for kind, name in MODELS.items():
+        model = onnx.load_from_string((out / name).read_bytes())
+        meta = {p.key: p.value for p in model.metadata_props}
+        meta["threshold"] = str(point[kind]["threshold"])
+        set_metadata(model, meta)
+        files[name] = model.SerializeToString()
+        metadata[kind] = meta
+    report = copy.deepcopy(report)
+    for kind in MODELS:
+        report["calibration"][kind]["fa_per_hour"] = point[kind]["calibration_fa_per_hour"]
+    hashes = {name: hashlib.sha256(files[name]).hexdigest()
+              for name in ("model.onnx", "model.int8.onnx", "vad.onnx")}
+    return _zip(files | _texts(metadata, report, hashes, point["fa_per_hour"]))
