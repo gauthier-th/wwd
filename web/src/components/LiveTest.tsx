@@ -11,11 +11,29 @@ export type ModelKind = "fp32" | "int8";
 const FILES: Record<ModelKind, string> = { fp32: "model.onnx", int8: "model.int8.onnx" };
 
 interface Trace {
-  ticks: Tick[];
+  ticks: Tick[]; // on screen, from the current detector only
   events: number[]; // tick indices
   received: number;
   vadMax: number; // loudest speech probability so far
   version: number;
+}
+
+/** A short rising two-note chime, on the microphone's own AudioContext (already allowed to
+ * play: it was started by the tap on "Start listening"). */
+function chime(context: AudioContext): void {
+  const t = context.currentTime;
+  const gain = context.createGain();
+  gain.gain.setValueAtTime(0.0001, t);
+  gain.gain.exponentialRampToValueAtTime(0.12, t + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
+  gain.connect(context.destination);
+  for (const [freq, at] of [[880, 0], [1320, 0.08]]) {
+    const osc = context.createOscillator();
+    osc.frequency.value = freq;
+    osc.connect(gain);
+    osc.start(t + at);
+    osc.stop(t + 0.3);
+  }
 }
 
 function LiveChart({ trace, threshold }: { trace: React.RefObject<Trace>; threshold: number }) {
@@ -32,6 +50,7 @@ function LiveChart({ trace, threshold }: { trace: React.RefObject<Trace>; thresh
       drawn = t.version;
       drawnThreshold = threshold;
       canvas.dataset.ticks = String(t.received);
+      canvas.dataset.shown = String(t.ticks.length);
       canvas.dataset.vadMax = t.vadMax.toFixed(3);
       const dpr = window.devicePixelRatio || 1;
       const w = canvas.clientWidth;
@@ -91,6 +110,10 @@ export function LiveTest({ training, point, kind, gate }: {
   const [error, setError] = useState<string | null>(null);
   const [detections, setDetections] = useState(0);
   const [flash, setFlash] = useState(false);
+  const [sound, setSound] = useState(true);
+  const soundOn = useRef(sound);
+  soundOn.current = sound;
+  const flashTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const trace = useRef<Trace>({ ticks: [], events: [], received: 0, vadMax: 0, version: 0 });
   const detector = useRef<DetectorHandle | null>(null);
   const mic = useRef<MicCapture | null>(null);
@@ -109,6 +132,7 @@ export function LiveTest({ training, point, kind, gate }: {
       const det = await startDetector(model.slice(0), vad.slice(0), { gate, overrides: { threshold } });
       det.onMessage((msg) => {
         if (msg.type === "ticks") {
+          if (msg.generation !== det.generation) return; // from the detector before a change
           const t = trace.current;
           t.ticks.push(...msg.ticks);
           if (t.ticks.length > HISTORY) t.ticks.splice(0, t.ticks.length - HISTORY);
@@ -118,7 +142,9 @@ export function LiveTest({ training, point, kind, gate }: {
             t.events.push(...msg.events.map((e) => e.tick));
             setDetections((n) => n + msg.events.length);
             setFlash(true);
-            setTimeout(() => setFlash(false), 1200);
+            clearTimeout(flashTimer.current);
+            flashTimer.current = setTimeout(() => setFlash(false), 1200);
+            if (soundOn.current && mic.current) chime(mic.current.context);
           }
           t.version++;
         } else if (msg.type === "error") setError(msg.message);
@@ -144,10 +170,17 @@ export function LiveTest({ training, point, kind, gate }: {
     setRunning(false);
   }
 
-  // Model, gate or sensitivity changed while listening: swap them in without dropping the mic.
+  // Model, gate or sensitivity changed while listening: start a fresh view (the new detector
+  // numbers its ticks from 0) and swap them in without dropping the mic.
   useEffect(() => {
     const det = detector.current;
     if (!running || !det) return;
+    const t = trace.current;
+    t.ticks = [];
+    t.events = [];
+    t.version++;
+    setDetections(0);
+    setFlash(false);
     let cancelled = false;
     void (async () => {
       const [model, vad] = await Promise.all([load(kind), load("vad")]);
@@ -167,13 +200,19 @@ export function LiveTest({ training, point, kind, gate }: {
                 disabled={starting} data-testid="live-toggle">
           {running ? "Stop listening" : starting ? "Starting…" : "Start listening"}
         </button>
+        <label className="check small">
+          <input type="checkbox" checked={sound} onChange={(e) => setSound(e.target.checked)} />
+          Sound
+        </label>
         <span className="spacer" />
-        <span className="detected" style={{ opacity: flash ? 1 : 0 }} aria-live="assertive">
-          {flash ? `“${training.report?.wake_word}” detected` : ""}
-        </span>
         <span className="badge badge-accent" data-testid="detections">{detections} detected</span>
       </div>
-      <LiveChart trace={trace} threshold={threshold} />
+      <div className="chart-wrap">
+        <LiveChart trace={trace} threshold={threshold} />
+        <div className="chart-flash" style={{ opacity: flash ? 1 : 0 }} aria-live="assertive">
+          {flash ? `“${training.report?.wake_word}” detected` : ""}
+        </div>
+      </div>
       <div className="legend">
         <span><span className="swatch" style={{ background: "var(--score)" }} />Wake-word score</span>
         <span><span className="swatch" style={{ background: "var(--vad)" }} />Speech (VAD)</span>

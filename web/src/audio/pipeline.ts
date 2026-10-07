@@ -13,6 +13,8 @@ export interface DetectorOptions {
 
 export interface DetectorHandle {
   worker: Worker;
+  /** Bumped by each reconfigure: tick messages from older generations are stale. */
+  generation: number;
   config: DetectorConfig;
   metadata: Record<string, string>;
   send(msg: ToWorker, transfer?: Transferable[]): void;
@@ -34,24 +36,26 @@ export async function startDetector(
     worker.addEventListener("message", listener);
     return () => worker.removeEventListener("message", listener);
   };
-  const init = (m: ArrayBuffer, v: ArrayBuffer | null, o: DetectorOptions) =>
+  const init = (generation: number, m: ArrayBuffer, v: ArrayBuffer | null, o: DetectorOptions) =>
     new Promise<Extract<FromWorker, { type: "ready" }>>((resolve, reject) => {
       const off = onMessage((msg) => {
-        if (msg.type === "ready") resolve(msg);
+        if (msg.type === "ready" && msg.generation === generation) resolve(msg);
         else if (msg.type === "error") reject(new Error(msg.message));
-        if (msg.type !== "ticks") off();
+        else return;
+        off();
       });
-      send({ type: "init", model: m, vad: v, gate: o.gate ?? true, overrides: o.overrides });
+      send({ type: "init", generation, model: m, vad: v, gate: o.gate ?? true, overrides: o.overrides });
     });
-  const ready = await init(model, vad, options);
+  const ready = await init(0, model, vad, options);
   const handle: DetectorHandle = {
     worker,
+    generation: 0,
     config: ready.config,
     metadata: ready.metadata,
     send,
     onMessage,
     async reconfigure(m, v, o = {}) {
-      const next = await init(m, v, o);
+      const next = await init(++handle.generation, m, v, o);
       handle.config = next.config;
       handle.metadata = next.metadata;
     },

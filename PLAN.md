@@ -437,6 +437,8 @@ Target: under 2 minutes on CPU. No GPU on the server.
    - a live canvas chart of the wake score and the VAD probability, with the threshold line and detection marks;
    - fp32 or int8, and a gate on/off toggle;
    - a **sensitivity slider** over the training's operating points, from 0.1 to 5 false alarms per hour, each with its calibrated threshold per file (§9.3). Changes apply while listening: the detector worker re-initializes without dropping the mic.
+   - **Each change starts a fresh view** and resets the detection count. The new detector numbers its ticks from 0, so the worker tags its messages with a generation and the page drops stale ones.
+   - **A short chime on each detection,** played on the microphone's AudioContext, which the tap on "Start listening" already unlocked. It can be muted.
 6. **Download:** the bundle at the chosen operating point (`bundle.zip?fa_per_hour=…`), plus the training report.
 
 **Two practical notes:**

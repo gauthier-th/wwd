@@ -523,10 +523,23 @@ input[type="range"] {
   vertical-align: -1px;
 }
 
-.detected {
-  font-weight: 700;
+.chart-wrap {
+  position: relative;
+}
+
+.chart-flash {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2px 12px;
+  border-radius: 999px;
+  background: var(--ok-soft);
   color: var(--ok);
-  transition: opacity 0.4s;
+  font-weight: 700;
+  white-space: nowrap;
+  pointer-events: none;
+  transition: opacity 0.3s;
 }
 
 .segmented {

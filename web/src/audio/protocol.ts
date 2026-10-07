@@ -2,9 +2,12 @@
 
 import type { DetectorConfig, Tick, WakeEvent } from "@wwd/runtime";
 
+// Each init starts a new Detector, whose tick numbering restarts at 0: messages carry the
+// generation of the detector that produced them, so the page can drop stale ones.
 export type ToWorker =
   | {
       type: "init";
+      generation: number;
       model: ArrayBuffer;
       vad: ArrayBuffer | null;
       gate: boolean;
@@ -15,8 +18,8 @@ export type ToWorker =
   | { type: "reset" };
 
 export type FromWorker =
-  | { type: "ready"; config: DetectorConfig; metadata: Record<string, string> }
-  | { type: "ticks"; ticks: Tick[]; events: WakeEvent[]; samples: number }
+  | { type: "ready"; generation: number; config: DetectorConfig; metadata: Record<string, string> }
+  | { type: "ticks"; generation: number; ticks: Tick[]; events: WakeEvent[]; samples: number }
   | { type: "error"; message: string };
 
 // Messages between the main thread and recorder.worker.ts.

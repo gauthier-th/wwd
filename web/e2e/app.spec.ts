@@ -58,11 +58,17 @@ test("record, train, test live and download a wake word", async ({ page, browser
     await expect.poll(async () => Number(await page.getByTestId("live-chart").getAttribute("data-vad-max")),
       { timeout: 15_000 }).toBeGreaterThan(0.5);
   }
+  // Each change starts a fresh view (the new detector numbers its ticks from 0).
+  const shown = async () => Number(await page.getByTestId("live-chart").getAttribute("data-shown"));
+  await expect.poll(shown, { timeout: 30_000 }).toBeGreaterThanOrEqual(40);
   await page.getByRole("button", { name: "Small (int8)" }).click();
   await page.getByTestId("gate").uncheck();
   await page.getByTestId("sensitivity").fill("5");
+  await expect.poll(shown, { timeout: 5_000 }).toBeLessThan(40);
+  await expect(page.getByTestId("detections")).toHaveText(/^\d+ detected$/);
   const before = await ticks(page);
   await expect.poll(() => ticks(page), { timeout: 30_000 }).toBeGreaterThan(before + 20);
+  await expect.poll(shown, { timeout: 30_000 }).toBeGreaterThan(20);
   await page.getByTestId("live-toggle").click();
   await expect(page.getByTestId("live-toggle")).toHaveText("Start listening");
 
