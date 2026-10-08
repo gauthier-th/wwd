@@ -1,6 +1,6 @@
 # Few-shot wake-word trainer: plan
 
-Last updated: 2026-10-08 (M4 tooling done; device measurements waiting on hardware)
+Last updated: 2026-10-08 (M4 done: Raspberry Pi 4 and Android measured, shortened field test)
 
 ## 1. Goal and scope
 
@@ -38,7 +38,7 @@ A user records a few examples of a wake word in the browser. The server fine-tun
 | 3 | ✅ **Large downloads** (about 135 GB): done by `training.download`, resumed once after an interruption | Your bandwidth and your timing |
 | 4 | ✅ Not needed on this machine: Chromium and Firefox ran without extra system libraries. CI installs them with `--with-deps`. | |
 | 5 | **HTTPS for testing on a phone over the LAN** (M3's real-device check, M4): mkcert with its CA trusted on the phone, or a tunnel such as `cloudflared tunnel --url http://localhost:8000`. The server serves the app and the API on one origin, so one tunnel is enough. | Needs your devices. Browsers only allow mic access on HTTPS or localhost. |
-| 6 | **Hardware for M4**: a Raspberry Pi 4/5 with a USB mic, and a phone. **Android (Chrome)** is the phone; no Pi yet. For the phone, `adb reverse tcp:8000 tcp:8000` avoids HTTPS. | |
+| 6 | ✅ **Hardware for M4**: a Raspberry Pi 4B and an Android phone (Chrome). For the phone, `adb reverse tcp:8000 tcp:8000` avoids HTTPS. | |
 | 7a | *(optional)* `sudo apt install qemu-user-static`, so `scripts/test_aarch64.sh` can run the runtime on emulated aarch64 before a Pi | Installs a system package |
 | 7 | *(M5 only)* Decide whether to rent a larger GPU for the teacher model | Cost decision. See §7. |
 
@@ -474,7 +474,7 @@ Target: under 2 minutes on CPU. No GPU on the server.
 | **M1** ✅ | `training`: download, prepare, student-only training, few-shot and end-to-end evals, bank, base **v0.1** | **Done 2026-10-06.** Few-shot (10 clips) recall@1%FAR **95.1%** on unseen words. End to end **77% recall at 0.5 false accepts/h** (82% at 1/h), with calibration holding out of sample (0.60/h measured). Encoder parity: wasm vs Python 1.3e-7 (fp32), int8 bit-identical. See §12.1. |
 | **M2** ✅ | `server`: uploads + checks, jobs, quick mode, calibration, compose, verify, SSE | **Done 2026-10-07.** `scripts/m2_smoke.sh` drives the API with curl against v0.1: a French held-out word, a 10-utterance take, 54 s of training on the CPU, 0 false accepts in 1.4 h of held-out audio, and 48/50 (fp32) and 47/50 (int8) other speakers' utterances detected. Python and wasm runtimes fire identically on the bundle. On 24 held-out words, the shipped fp32 file reaches 80.9% recall at 0.36 false accepts/h out of sample (PyTorch: 79.7%); int8 reaches 78.9% at 0.38/h. See §12.2. |
 | **M3** ✅ | `web`: record → review → train → live test → download | **Done 2026-10-07, on emulated devices.** The full flow passes in Chromium, Firefox and WebKit (iPhone 15 emulation), in the browser end-to-end tests against a real API. With the real v0.1 model in Chromium, the live test detected 19 of 20 other speakers saying the word. Still to do on your side: a real iPhone over HTTPS (§2, item 5). See §12.3. |
-| **M4** ⏳ | Devices: Pi 4/5 (Python ORT on aarch64), phone browser (wasm) | CPU %, latency and a 24 h real-room false-accept test (TV + speech) measured on each. **Tooling done 2026-10-08:** benchmark, field-test logger and report, device kit, and a device-test page in the app. x86 and desktop-browser reference numbers are in. Waiting on: the Android phone run (yours), a Pi (none yet), and qemu for emulated aarch64 parity. See §12.4. |
+| **M4** ✅ | Devices: Pi 4/5 (Python ORT on aarch64), phone browser (wasm) | CPU %, latency and a 24 h real-room false-accept test (TV + speech) measured on each. **Done 2026-10-08, with a shortened field test (your call).** It runs on a Raspberry Pi 4B and in Chrome on Android. On the Pi 4: 40 ms per tick, 36–42% of one core. No false accepts in about 1 h on the Pi, 1 h on the phone and 3 h on a computer, for models calibrated to 0.25/h. The 24 h runs and the phone benchmark weren't done; the tooling is ready for them. See §12.4. |
 | **M5** | Base **v1**: XLS-R teacher + distillation | End-to-end metrics beat v0.1. Older user models keep their base version. |
 | **M6** | Quality mode, multi-speaker enrollment, auth, S3, retention policy | — |
 
@@ -574,7 +574,7 @@ The base model is BC-ResNet (204k parameters, 256-dim embedding), trained for 80
 
 **Not done:** a real iPhone and a real Android phone over HTTPS. Playwright's WebKit is Safari's engine at phone size, with touch and mock capture devices, but not iOS's audio stack or its permission prompts. That check needs your devices and an HTTPS tunnel (§2, item 5), and belongs with M4's device work.
 
-### 12.4 M4: devices (tooling done, measurements pending)
+### 12.4 M4 results (devices)
 
 **Protocol, the same on every device:**
 1. **Parity:** the runtime's golden tests on the device's own onnxruntime build (`python -m pytest runtime/tests` on a Pi; the browser runs the same checks in `/harness.html`).
@@ -600,10 +600,27 @@ The base model is BC-ResNet (204k parameters, 256-dim embedding), trained for 80
 | Ryzen 7 7700X | Python onnxruntime 1.30, 1 thread | 2.1 / 2.5 ms | 2.3 / 2.5 ms | 1.9% of a core (int8 2.0%) |
 | Ryzen 7 7700X | Chromium, wasm, 1 thread | 6.8 / 7.5 ms | 11.3 / 12.3 ms | 6.0% busy (int8 9.8%) |
 | Ryzen 7 7700X | Firefox, wasm, 1 thread | 7.0 / 8.0 ms | 12.0 / 13.0 ms | 6.3% busy (int8 10.1%) |
-| Raspberry Pi 4/5 | Python onnxruntime, aarch64 | pending | pending | pending |
-| Android phone | Chrome, wasm | pending | pending | pending |
+| Raspberry Pi 4B (Cortex-A72, 4 cores) | Python 3.13 onnxruntime 1.30, aarch64, 1 thread | 40.4 / 40.8 ms | 41.7 / 41.9 ms | 36% of a core (gate off 42%; int8 37% / 44%) |
+| Android phone | Chrome, wasm | not measured | not measured | not measured |
 
-- **int8 isn't faster in the browser:** about 1.7× slower than fp32 under wasm, because QDQ adds work the wasm kernels don't recover. Natively on x86 the two are even. Unless a device measures otherwise, browsers and phones should use `model.onnx`. The Pi's ARM dot-product kernels may favor int8; the Pi benchmark decides.
+- **int8 is faster on no device measured,** so `model.onnx` is the one to deploy, and the bundle's README now says so:
+  - **Browsers:** about 1.7× slower than fp32, because QDQ adds work the wasm kernels don't recover.
+  - **x86:** even with fp32.
+  - **Pi 4:** even. One window takes 36.3 ms fp32 and 36.4 ms int8. The Cortex-A72 is ARMv8.0, without the int8 dot-product instructions (`sdot`) that make int8 pay off.
+  - int8 still saves 0.4 MB of file and costs about 2 points of recall (§12.2). A Pi 5 (Cortex-A76, ARMv8.2, with `sdot`) may differ; it's unmeasured.
+- **Raspberry Pi 4B in detail** (the 60 s benchmark):
+  - **Time per tick:** the wake model takes 36.3 ms per window; three VAD frames take 1.58 ms each, 4.7 ms per tick.
+  - **Headroom:** a tick takes 40 ms against its 96 ms, a real-time factor of 0.36–0.42, so one core keeps up with 2.4× to spare.
+  - **CPU:** the detector uses about a third of one of the four cores while people talk. In silence the gate leaves only the VAD, about 5% of a core.
+  - **Memory:** 85 MB peak. A Ryzen 7700X is 19× faster per tick.
+  - **If a Pi 4 ever needs less CPU:** the conv-STFT frontend is about a third of the multiply-adds and recomputes overlapping windows every tick, so a streaming frontend is the lever.
+- **The field test, shortened to about 5 h (your call).** You ran it about 1 h on the Pi 4B, 1 h in Chrome on Android, and 3 h on a computer, with "hey jarvis" models (French, 10 recordings) calibrated to 0.25 false accepts per hour. There were **no false accepts**.
+  - **Expected:** about 1.25 at the calibrated rate, so seeing none has a 29% chance and is consistent.
+  - **What it bounds:** the rate stays below roughly 0.6/h at 95% confidence (3 / 5 h), across all three devices.
+  - **Still open:**
+    - 24 h runs with TV and conversation, to get tighter numbers;
+    - the Android benchmark (one minute on the Device test page), for phone latency and CPU;
+    - the golden parity tests on the Pi itself (`python -m pytest runtime/tests` in the kit).
 - **The gate** saves less than 20% here, because the benchmark audio is speech 81% of the time. In a quiet room it closes most of the time.
 - **Peak memory** of the Python runtime: 82 MB.
 - **The logger, checked by replay:** the M2 test recording (50 utterances) through `runtime.listen --input --log` gives 48 triggers with clips. `fieldreport`'s replay at the run's threshold reproduces those 48 exactly.

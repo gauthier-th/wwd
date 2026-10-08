@@ -51,7 +51,7 @@ README = """\
 | File | What it is |
 |---|---|
 | `model.onnx` | Detector, float32. Input `audio` [N, 24000] (1.5 s at 16 kHz), output `score` [N]. |
-| `model.int8.onnx` | Same detector with an int8 encoder: smaller, same interface. |
+| `model.int8.onnx` | Same detector with an int8 encoder: a smaller file, same interface. Not faster on a Raspberry Pi 4 or in a browser, and about 2 points less recall: prefer `model.onnx` unless size matters. |
 | `vad.onnx` | Silero VAD: the speech gate. |
 | `model.json` | Detector settings (also stored in each ONNX file's metadata) and evaluation. |
 
