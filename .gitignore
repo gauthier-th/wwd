@@ -11,9 +11,9 @@ dist/
 web/test-results/
 web/playwright-report/
 
-# Large local artifacts (see PLAN.md §5)
-data/
-models/
+# Large local artifacts (see PLAN.md §5); anchored, so runtime/testdata/models/ is kept
+/data/
+/models/
 
 # web end-to-end test data (tiny base model, fixtures, database)
 web/.e2e/

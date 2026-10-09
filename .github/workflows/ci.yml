@@ -2,6 +2,7 @@ name: ci
 
 on:
   push:
+    branches: ["**"] # not tags (e.g. a base-model release)
   pull_request:
   workflow_dispatch: # e.g. to publish again after a new base-model release
 
@@ -18,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0 # no floating major tag
       - run: uv sync --extra server --locked # CPU torch is enough for tests
       - run: uv run ruff check .
       - run: uv run lint-imports
@@ -55,7 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0 # no floating major tag
       - run: uv sync --extra server --locked # the tiny base model and its web assets
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
@@ -86,7 +87,9 @@ jobs:
         uses: actions/configure-pages@v6
       - name: Base model files (release ${{ env.BASE_RELEASE }})
         if: env.PUBLISH == 'true'
-        run: gh release download "$BASE_RELEASE" --pattern base.tar.gz --output - | tar -xz -C web/public
+        run: |
+          mkdir -p web/public
+          gh release download "$BASE_RELEASE" --pattern base.tar.gz --output - | tar -xz -C web/public
         env:
           GH_TOKEN: ${{ github.token }}
       - run: pnpm --filter @wwd/web build
