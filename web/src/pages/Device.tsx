@@ -1,6 +1,6 @@
 // Device test (PLAN.md M4): benchmark this phone or computer, and run a long field test with the
-// trained files. Field tests upload a minute at a time to the server, in the layout
-// `runtime.listen --log` writes on a Pi, so `runtime.fieldreport` reads both.
+// trained files. Field tests save a minute at a time in this browser (local/backend.ts), as
+// `runtime.listen --log` logs on a Pi; local/fieldreport.ts summarizes them as fieldreport.py does.
 
 import { decodeWav, encodeWav } from "@wwd/runtime";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -15,6 +15,7 @@ import { DetectorSettings, useDetectorChoice } from "../components/DetectorSetti
 import { micError } from "../components/MicSettings";
 import type { ModelKind } from "../components/LiveTest";
 import { falseAlarmRate, hours } from "../format";
+import { useObjectUrl } from "../local/files";
 import { useTraining } from "../hooks";
 
 const FILES: Record<ModelKind, string> = { fp32: "model.onnx", int8: "model.int8.onnx" };
@@ -22,7 +23,7 @@ const FILES: Record<ModelKind, string> = { fp32: "model.onnx", int8: "model.int8
 const UPLOAD_EVERY_MS = Number(new URLSearchParams(location.search).get("upload_s") ?? 60) * 1000;
 const TICK_MS = 1536 / 16; // runtime/SPEC.md: one tick per 1536 samples at 16 kHz
 const BENCH_SECONDS = 30;
-// Server limits per upload (server/device.py).
+// Limits per saved chunk (as server/device.py had).
 const MAX_TICKS = 20_000;
 const MAX_STATS = 50;
 const MAX_EVENTS = 90;
@@ -166,7 +167,8 @@ function Benchmark({ training }: { training: Training }) {
       for (let i = 0; i < audio.length; i += speech.length) audio.set(speech.subarray(0, audio.length - i), i);
       const vad = await fetchBytes(artifactUrl(training.id, "vad.onnx"));
       const out: BenchRow[] = [];
-      for (const model of ["fp32", "int8"] as const) {
+      const models: ModelKind[] = training.report?.verification.int8 ? ["fp32", "int8"] : ["fp32"];
+      for (const model of models) {
         const bytes = await fetchBytes(artifactUrl(training.id, FILES[model]));
         for (const gate of [true, false]) {
           setStep(`${model === "fp32" ? "Full" : "Small"} model, gate ${gate ? "on" : "off"}…`);
@@ -438,7 +440,7 @@ function FieldTest({ training, report }: { training: Training; report: Report })
       <p className="muted small">
         Leave the device listening where it will be used, for up to 24 hours: TV on part of the time, people talking,
         no wake word (or note when you said it). Every trigger is kept with the audio around it, and the log is
-        uploaded every minute, so closing the page loses at most a minute. Keep this page open and the phone
+        saved in this browser every minute, so closing the page loses at most a minute. Keep this page open and the phone
         plugged in; the screen stays on.
       </p>
       <DetectorSettings state={settings} disabled={phase !== "idle"} />
@@ -474,7 +476,7 @@ function FieldTest({ training, report }: { training: Training; report: Report })
           </div>
           <div className="small muted" data-testid="field-upload">
             {run.uploadError ? `Upload failed, will retry: ${run.uploadError}`
-              : run.lastUpload ? `Uploaded ${Math.round((Date.now() - run.lastUpload) / 1000)} s ago`
+              : run.lastUpload ? `Saved ${Math.round((Date.now() - run.lastUpload) / 1000)} s ago`
               : "First upload after a minute"}
             {" · "}{run.totals.ticks} ticks
           </div>
@@ -531,7 +533,7 @@ function FieldSummary({ id, report: r }: { id: string; report: FieldReport }) {
               <span className="muted small">{new Date(e.time * 1000).toLocaleString()}</span>
               <span className="small">score {e.score.toFixed(2)}</span>
               <span className="spacer" />
-              {e.clip && <audio src={fieldClipUrl(id, e.clip)} controls preload="none" style={{ height: 32, maxWidth: 180 }} />}
+              {e.clip && <ClipAudio path={fieldClipUrl(id, e.clip)} />}
             </li>
           ))}
         </ul>
@@ -580,4 +582,10 @@ function PastRuns({ training }: { training: Training }) {
       </ul>
     </section>
   );
+}
+
+/** A trigger's clip, stored in this browser. */
+function ClipAudio({ path }: { path: string }) {
+  const url = useObjectUrl(path);
+  return url ? <audio src={url} controls preload="none" style={{ height: 32, maxWidth: 180 }} /> : null;
 }

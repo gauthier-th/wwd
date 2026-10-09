@@ -1,5 +1,11 @@
-// Typed client for the server API (server/api.py, PLAN.md §9.1). Same origin: Vite proxies
-// /api in development, and the server serves the built app in production.
+// The app's data layer. In this browser-only build there is no server: `local/backend.ts`
+// does what server/api.py did, in the page and in Web Workers, and keeps everything in
+// IndexedDB. Paths under /api/ still name files (audio, models, bundles) for `fetchBytes`.
+
+import { ApiError } from "./errors";
+import { local, localDevice } from "./local/backend";
+
+export { ApiError };
 
 export type SampleKind = "positive" | "other_speech" | "ambience";
 export type TrainingStatus = "queued" | "running" | "done" | "failed" | "cancelled";
@@ -40,7 +46,7 @@ export interface FileVerification {
 export interface OperatingPoint {
   fa_per_hour: number;
   fp32: { threshold: number; calibration_fa_per_hour: number };
-  int8: { threshold: number; calibration_fa_per_hour: number };
+  int8?: { threshold: number; calibration_fa_per_hour: number }; // server builds only
 }
 
 export interface Report {
@@ -54,7 +60,7 @@ export interface Report {
   calibration: {
     hours: number;
     fp32: { threshold: number; fa_per_hour: number; target_met: boolean };
-    int8: { threshold: number; fa_per_hour: number; target_met: boolean; own_cache: boolean };
+    int8?: { threshold: number; fa_per_hour: number; target_met: boolean; own_cache: boolean };
   };
   operating_points: OperatingPoint[];
   cross_validation: null | {
@@ -63,7 +69,7 @@ export interface Report {
     recall_clean: number;
     per_recording: { sample_id: string; recall_noisy: number; recall_clean: number; weak: boolean }[];
   };
-  verification: { fp32: FileVerification; int8: FileVerification };
+  verification: { fp32: FileVerification; int8?: FileVerification }; // the browser builds model.onnx only
   timings_s: Record<string, number>;
 }
 
@@ -106,53 +112,16 @@ export interface ProgressEvent {
   at: string;
 }
 
-export class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    readonly detail: string,
-  ) {
-    super(detail);
-  }
-}
-
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const init: RequestInit = { method };
-  if (body instanceof FormData) init.body = body;
-  else if (body !== undefined) {
-    init.body = JSON.stringify(body);
-    init.headers = { "content-type": "application/json" };
-  }
-  const res = await fetch(`/api${path}`, init);
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const data = await res.json();
-      detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
-    } catch {
-      // not JSON: keep the status line
-    }
-    throw new ApiError(res.status, detail);
-  }
-  return res.status === 204 ? (undefined as T) : res.json();
-}
-
 export const api = {
-  languages: () => call<Language[]>("GET", "/languages"),
-  baseModels: () => call<BaseModelInfo[]>("GET", "/base-models"),
-  createWakeWord: (name: string, language: string) =>
-    call<WakeWord>("POST", "/wakewords", { name, language }),
-  wakeWord: (id: string) => call<WakeWord>("GET", `/wakewords/${id}`),
-  deleteWakeWord: (id: string) => call<void>("DELETE", `/wakewords/${id}`),
-  upload: (id: string, kind: SampleKind, file: Blob, filename: string) => {
-    const form = new FormData();
-    form.append("kind", kind);
-    form.append("file", file, filename);
-    return call<{ upload_id: string; samples: Sample[] }>("POST", `/wakewords/${id}/samples`, form);
-  },
-  deleteSample: (id: string, sampleId: string) => call<void>("DELETE", `/wakewords/${id}/samples/${sampleId}`),
-  train: (id: string, targetFaPerHour: number) =>
-    call<Training>("POST", `/wakewords/${id}/trainings`, { mode: "quick", target_fa_per_hour: targetFaPerHour }),
-  training: (id: string) => call<Training>("GET", `/trainings/${id}`),
+  languages: local.languages,
+  baseModels: local.baseModels,
+  createWakeWord: local.createWakeWord,
+  wakeWord: local.wakeWord,
+  deleteWakeWord: local.deleteWakeWord,
+  upload: (id: string, kind: SampleKind, file: Blob, _filename: string) => local.upload(id, kind, file),
+  deleteSample: local.deleteSample,
+  train: local.train,
+  training: local.training,
 };
 
 export const sampleAudioUrl = (wakeWordId: string, sampleId: string) =>
@@ -164,7 +133,9 @@ export const bundleUrl = (training: Training, faPerHour: number) =>
     ? artifactUrl(training.id, "bundle.zip")
     : `/api/trainings/${training.id}/bundle.zip?fa_per_hour=${faPerHour}`;
 
+/** Bytes of a stored file (an /api/ path) or of any other URL. */
 export async function fetchBytes(url: string): Promise<ArrayBuffer> {
+  if (url.startsWith("/api/")) return local.bytes(url);
   const res = await fetch(url);
   if (!res.ok) throw new ApiError(res.status, `${url}: ${res.status}`);
   return res.arrayBuffer();
@@ -200,20 +171,6 @@ export interface DeviceRunInfo {
   summary?: Pick<FieldReport, "hours" | "triggers" | "false_accepts_per_hour" | "busy_pct" | "latency_ms" | "battery" | "host">;
 }
 
-export const deviceApi = {
-  runs: (trainingId: string) => call<DeviceRunInfo[]>("GET", `/trainings/${trainingId}/device-runs`),
-  saveBenchmark: (trainingId: string, body: unknown) => call<{ id: string }>("POST", `/trainings/${trainingId}/benchmarks`, body),
-  startFieldTest: (trainingId: string, body: { model: string; gate: boolean; fa_per_hour: number; device: unknown }) =>
-    call<{ id: string; threshold: number }>("POST", `/trainings/${trainingId}/fieldtests`, body),
-  chunk: (runId: string, data: unknown, ticks: Float32Array, clips: Blob[]) => {
-    const form = new FormData();
-    form.append("data", JSON.stringify(data));
-    if (ticks.length) form.append("ticks", new Blob([ticks as Float32Array<ArrayBuffer>]), "ticks.f32");
-    clips.forEach((clip, i) => form.append("clips", clip, `clip-${i}.wav`));
-    return call<{ events: number }>("POST", `/fieldtests/${runId}/chunk`, form);
-  },
-  finish: (runId: string) => call<FieldReport>("POST", `/fieldtests/${runId}/finish`),
-  report: (runId: string) => call<FieldReport>("GET", `/fieldtests/${runId}/report`),
-};
+export const deviceApi = localDevice;
 
 export const fieldClipUrl = (runId: string, clip: string) => `/api/fieldtests/${runId}/clips/${clip.split("/").pop()}`;

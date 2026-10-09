@@ -10,6 +10,9 @@ export interface DetectorChoice {
   gate: boolean;
 }
 
+/** The calibrated threshold of one model file at an operating point (fp32 if there's no int8). */
+export const thresholdOf = (point: OperatingPoint, kind: ModelKind) => (point[kind] ?? point.fp32).threshold;
+
 /** Sensitivity (one of the training's calibrated operating points), model file and speech gate. */
 export function useDetectorChoice(report: Report) {
   const points = report.operating_points;
@@ -17,11 +20,13 @@ export function useDetectorChoice(report: Report) {
     Math.max(0, points.findIndex((p) => p.fa_per_hour === report.target_fa_per_hour)));
   const [kind, setKind] = useState<ModelKind>("fp32");
   const [gate, setGate] = useState(true);
-  return { choice: { point: points[index], kind, gate }, points, index, setIndex, setKind, setGate };
+  const hasInt8 = report.verification.int8 !== undefined; // server trainings only
+  return { choice: { point: points[index], kind: hasInt8 ? kind : "fp32", gate }, points, index, setIndex, setKind,
+           setGate, hasInt8 };
 }
 
 export function DetectorSettings({ state, disabled }: { state: ReturnType<typeof useDetectorChoice>; disabled?: boolean }) {
-  const { choice, points, index, setIndex, setKind, setGate } = state;
+  const { choice, points, index, setIndex, setKind, setGate, hasInt8 } = state;
   const { point, kind, gate } = choice;
   return (
     <>
@@ -37,16 +42,18 @@ export function DetectorSettings({ state, disabled }: { state: ReturnType<typeof
         </div>
         <div className="small">
           About <strong>{falseAlarmRate(point.fa_per_hour)}</strong> false alarm
-          {point.fa_per_hour > 1 ? "s" : ""} in conversation (threshold {point[kind].threshold.toFixed(3)}).
+          {point.fa_per_hour > 1 ? "s" : ""} in conversation (threshold {thresholdOf(point, kind).toFixed(3)}).
         </div>
       </div>
       <div className="row" style={{ margin: "12px 0" }}>
-        <div className="segmented" role="group" aria-label="Model file">
-          <button type="button" aria-pressed={kind === "fp32"} disabled={disabled} onClick={() => setKind("fp32")}>Full</button>
-          <button type="button" aria-pressed={kind === "int8"} disabled={disabled} onClick={() => setKind("int8")}>
-            Small (int8)
-          </button>
-        </div>
+        {hasInt8 && (
+          <div className="segmented" role="group" aria-label="Model file">
+            <button type="button" aria-pressed={kind === "fp32"} disabled={disabled} onClick={() => setKind("fp32")}>Full</button>
+            <button type="button" aria-pressed={kind === "int8"} disabled={disabled} onClick={() => setKind("int8")}>
+              Small (int8)
+            </button>
+          </div>
+        )}
         <label className="check small">
           <input type="checkbox" checked={gate} disabled={disabled} onChange={(e) => setGate(e.target.checked)}
                  data-testid="gate" />

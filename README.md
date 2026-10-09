@@ -37,22 +37,32 @@ scripts/m5_pipeline.sh v1     # XLS-R teacher, its embedding cache, distilled st
 Both run for hours and resume where they stopped: start them detached, e.g.
 `setsid nohup scripts/m5_pipeline.sh v1 >> data/m5.log 2>&1 < /dev/null &`.
 
-## Web app
+## Web app (static, trains in the browser)
 
-```sh
-pnpm --filter @wwd/web dev                         # http://localhost:5173, /api proxied to :8000
-```
+On this branch the web app needs no server. Recording, the upload checks, training,
+calibration, the live test and the download all run in the browser (Web Workers, onnxruntime-web
+wasm). Recordings, trainings and models stay in IndexedDB, so the site is plain static files.
 
-Or build it once and let the API serve it, so the app and the API share one origin:
+1. Export the base model's files for the browser, once per base model (about 230 MB):
 
-```sh
-pnpm --filter @wwd/web build
-WWD_WORKER_THREAD=1 uv run --extra server uvicorn server.api:app   # app + API + worker on :8000
-```
+   ```sh
+   uv run --extra training python -m scripts.export_web_assets models/base/v1   # -> web/public/base/
+   ```
 
-Browsers only open the microphone on `https://` or `localhost`. To try it on a phone, put the
-server behind HTTPS, for example `cloudflared tunnel --url http://localhost:8000` or a mkcert
-certificate trusted by the phone.
+2. Build, then serve `web/dist/` with any static file server:
+
+   ```sh
+   pnpm --filter @wwd/web build        # WWD_BASE_PATH=/sub/path/ to serve it under a sub-path
+   pnpm --filter @wwd/web preview      # or: pnpm --filter @wwd/web dev
+   ```
+
+The first training downloads the base model's files (about 230 MB), and Cache Storage keeps them
+for later visits. Browsers only open the microphone on `https://` or `localhost`, so serve the
+site over HTTPS, for example GitHub Pages or `cloudflared tunnel --url http://localhost:4173`.
+No cross-origin-isolation headers are needed.
+
+The fine-tuning server (`server/`) still exists, and the evaluation tools use its quick mode,
+but this app doesn't call it.
 
 ## Tests
 
@@ -60,9 +70,16 @@ certificate trusted by the phone.
 uv run pytest                 # core, server (tiny base model) + Python runtime (golden parity)
 uv run ruff check . && uv run lint-imports
 pnpm --filter @wwd/runtime test        # JS runtime, onnxruntime-web wasm under Node
-pnpm --filter @wwd/web test            # app unit tests
-pnpm --filter @wwd/web test:e2e        # Chromium, Firefox, WebKit (iPhone): the app against a real
-                                       # API on a tiny base model, plus runtime parity and the mic
+uv run python -m scripts.make_web_fixtures   # tiny base model + web assets + Python goldens
+pnpm --filter @wwd/web test            # app unit tests: the ported maths against Python,
+                                       # a whole browser training on the tiny base under Node
+pnpm --filter @wwd/web test:e2e        # Chromium, Firefox, WebKit (iPhone): the static app on the
+                                       # tiny base, training in the browser; runtime parity, the mic
+
+# Browser training against the server's, on 24 held-out words (needs training/ data):
+uv run --extra training python -m scripts.web_quality prepare data/web_quality
+WWD_QUALITY=../data/web_quality pnpm --filter @wwd/web exec vitest run quality
+uv run --extra training python -m scripts.web_quality score data/web_quality
 ```
 
 ## Run a model

@@ -40,20 +40,22 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r typecheck
       - run: pnpm --filter @wwd/runtime test
-      - run: pnpm --filter @wwd/web test # unit tests (speech segmentation)
+      - run: pnpm --filter @wwd/web test # unit tests; the fixture-based ones run in the browsers job
 
   browsers:
-    name: Browsers (Chromium, Firefox, WebKit; app flow against a real API)
+    name: Browsers (Chromium, Firefox, WebKit; the static app, training in the browser)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10
-      - run: uv sync --extra server --locked # e2e/api-server.sh: the API on a tiny base model
+      - run: uv sync --extra server --locked # the tiny base model and its web assets
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: uv run python -m scripts.make_web_fixtures
+      - run: pnpm --filter @wwd/web test # the ported maths against Python, a whole training in Node
       - run: pnpm --filter @wwd/web exec playwright install --with-deps chromium firefox webkit
       - run: pnpm --filter @wwd/web test:e2e

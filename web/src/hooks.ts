@@ -1,7 +1,8 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
-import { api, eventsUrl, type ProgressEvent, type Training } from "./api";
+import { api, type ProgressEvent, type Training } from "./api";
+import { subscribe } from "./local/backend";
 
 export const FINAL_STATUSES = ["done", "failed", "cancelled"] as const;
 export const isFinal = (t: Training) => (FINAL_STATUSES as readonly string[]).includes(t.status);
@@ -16,9 +17,14 @@ export const useWakeWord = (id: string) =>
   useQuery({ queryKey: ["wakeword", id], queryFn: () => api.wakeWord(id) });
 
 export const useTraining = (id: string) =>
-  useQuery({ queryKey: ["training", id], queryFn: () => api.training(id) });
+  useQuery({
+    queryKey: ["training", id],
+    queryFn: () => api.training(id),
+    // A training another tab is running sends no events here: check on it now and then.
+    refetchInterval: (q) => (q.state.data && !isFinal(q.state.data) ? 5000 : false),
+  });
 
-/** Server-sent progress of a training; refreshes the training (and its wake word) at the end. */
+/** Progress of a training running in this tab; refreshes the training (and its wake word) at the end. */
 export function useTrainingEvents(training: Training | undefined) {
   const [events, setEvents] = useState<ProgressEvent[]>([]);
   const client = useQueryClient();
@@ -28,19 +34,15 @@ export function useTrainingEvents(training: Training | undefined) {
 
   useEffect(() => {
     if (!active || !id) return;
-    setEvents([]); // the stream replays every event from the start
-    const source = new EventSource(eventsUrl(id));
-    source.addEventListener("progress", (e) => {
-      const event = JSON.parse((e as MessageEvent).data) as ProgressEvent;
-      setEvents((prev) => [...prev, event]);
-    });
-    const finish = () => {
-      source.close(); // the server ends the stream; don't let EventSource reconnect
-      client.invalidateQueries({ queryKey: ["training", id] });
-      client.invalidateQueries({ queryKey: ["wakeword", wakeWordId] });
-    };
-    for (const name of [...FINAL_STATUSES, "gone"]) source.addEventListener(name, finish);
-    return () => source.close();
+    setEvents([]); // the subscription replays every event from the start
+    return subscribe(
+      id,
+      (event) => setEvents((prev) => [...prev, event]),
+      () => {
+        client.invalidateQueries({ queryKey: ["training", id] });
+        client.invalidateQueries({ queryKey: ["wakeword", wakeWordId] });
+      },
+    );
   }, [active, id, wakeWordId, client]);
 
   return events;

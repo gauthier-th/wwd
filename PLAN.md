@@ -1,6 +1,6 @@
 # Few-shot wake-word trainer: plan
 
-Last updated: 2026-10-09 (M5 done: base v1, distilled from an XLS-R teacher, beats v0.1 end to end; M6 dropped)
+Last updated: 2026-10-09 (branch browser-only: the whole app runs in the browser, served as static files; §12.6)
 
 ## 1. Goal and scope
 
@@ -696,6 +696,73 @@ The base model is BC-ResNet (204k parameters, 256-dim embedding), trained for 80
 1. **Phrase classes** (§12.1, lever 1). Multi-word wake words like "hey jarvis" are still trained as single words.
 2. **Close more of the teacher gap.** The student has captured 30–45% of it. Options: distill on long-form speech windows too (unlabeled, and where false accepts happen), a longer schedule, or a width-40 student if devices can afford the cost (§12.4 has the Pi's headroom).
 3. **Kinyarwanda:** better embeddings didn't help it end to end. Look at its false accepts and its long, agglutinative words.
+
+### 12.6 Experiment: everything in the browser (branch `browser-only`)
+
+**Goal:** the web app does the whole job in the browser, served as static files with no server. That covers recording, upload checks, training, calibration, verification, the live test, the download and the device tests. This lifts §1's "training on the device" exclusion for browsers. Quick mode makes it possible: the encoder is frozen and the head is fitted in closed form (§9.3), so a training is about 4,200 encoder forward passes plus vector maths, with no backprop and no WebGPU.
+
+**What replaces the server** (`web/src/local/`):
+
+| Server | Browser |
+|---|---|
+| SQLite + files (`server/db.py`, `storage.py`) | IndexedDB (`db.ts`). Files are stored as ArrayBuffers: WebKit can't store Blobs in ephemeral sessions (private browsing, automated tests). |
+| Upload checks (`server/audio.py`) | `checks.ts`: the runtime's Silero VAD + `audio/segments.ts`, same thresholds and messages. Imports are decoded by the browser (`OfflineAudioContext` at 16 kHz). |
+| Quick mode (`server/quick.py`, `core/finetune.py`, `core/calibrate.py`, `core/augment.py`) | `train.ts`, `finetune.ts`, `augment.ts` + `fft.ts`, stage for stage, in a compute worker (`backend.worker.ts`). Embedding runs in up to 4 workers (`pool.ts`), each with its own single-threaded onnxruntime-web: parallel without SharedArrayBuffer, so no cross-origin-isolation headers are needed. |
+| `compose_head` (onnx library) | `compose.ts`: the export ships the encoder composed with a marker head and the byte offsets of its Gemm weight and bias. The browser writes the trained head there and appends `metadata_props` entries (protobuf merges fields that come later). |
+| Verification through the Python runtime | False accepts on the held-out ticks' embeddings, through `runtime/js`'s own `Gate` and `Trigger`. Every recording goes through `Detector` running the composed file. The file is checked against the head's maths. |
+| Bundle (`server/bundle.py`) | `bundle.ts` + a stored-zip writer (`zip.ts`). |
+| Device runs (`server/device.py`, `runtime/fieldreport.py`) | `backend.ts` + `fieldreport.ts`. |
+| SSE progress | An in-tab subscription. Each training holds a Web Lock, so another tab knows it's alive. A training whose tab closed is marked failed. |
+
+**Static assets** (`scripts/export_web_assets.py models/base/v1` → `web/public/base/`): **230 MB** for v1, downloaded on the first training and kept in Cache Storage. Every URL carries its file's hash.
+- **Calibration ticks** (14.4 h): 138 MB as int8 with per-row scales.
+- **Negative bank** (200k): 51 MB.
+- **Verification ticks:** 14 MB.
+- **Augmentation:** 5 min of noise, 2 min of babble, 200 RIRs: 17 MB.
+- **Model template and encoder:** 3 MB.
+
+What the reductions cost, measured with `eval_e2e` on the 240 words (fed back into the Python pipeline with `--variant`):
+
+| Assets | Size | Recall at 0.5/h (measured FA/h) |
+|---|---|---|
+| v1 as shipped to the server | 940 MB | 82.35% (0.69) |
+| int8 bank and cache, smaller augmentation set | 230 MB | **82.41%** (0.68): no cost |
+| + bank 100k, cache 7.0 h | 131 MB | 81.24% (0.62): −1.2 points |
+
+**Deliberate differences from the server:**
+- **`model.onnx` only.** int8 would need its own 138 MB calibration cache, and it's slower in browsers anyway (§12.4). The app hides the fp32/int8 choice for browser trainings.
+- **Different random streams.** Seeded, with one derived generator per window, so the result doesn't depend on which worker embeds what. The distributions match the server's.
+- **Reverb and EQ in one pass.** When a window gets both, they're applied together in the frequency domain, with the reverb's loudness match after the EQ. The level is re-randomized anyway.
+
+**Results:**
+- **The ported maths match Python:**
+  - trigger counts and calibrated thresholds (to 1e-12);
+  - stream recall, quantiles, folds, word normalization, speed perturbation;
+  - the pushed-prototype head (to 1e-4);
+  - the composed model's scores (within 1e-5, metadata identical to `compose_head`'s).
+
+  Golden values come from `scripts/make_web_fixtures.py`, checked by `web/src/local/golden.test.ts`.
+- **Same models as the server** (`scripts/web_quality.py`):
+  - **Method:** the browser code trained the 24 held-out words of `eval_shipped` under Node with the real v1 assets, and the Python runtime scored the composed files exactly as it scores the server's.
+  - **Recall: 85.22%**, the server's figure, identical word for word.
+  - **False accepts:** 15 against 14 in 34 h (0.44 vs 0.41/h).
+  - **Self-check:** the browser's own estimate, from quantized embeddings, was 0.41/h.
+  - **Speed:** 40 s per word on one Node thread.
+- **In real browsers** (Ryzen 7700X, assets served from localhost; "célébrer", a 10-utterance take):
+  - the upload checks take 1.8 s;
+  - training takes **13.7 s in Chromium and 13.8 s in Firefox** (about 8.6 s embedding across 4 workers, 2.5 s of folds, 0.5 s calibration, 1.5 s verification);
+  - the first training adds the 230 MB download: 16.2 s and 16.9 s over localhost;
+  - 8/9 recordings detected, 0 false alarms in 1.4 h, 86% estimated recall in noise.
+- **End-to-end tests** (`web/e2e/`, on the tiny base): 15/15 in Chromium, Firefox and WebKit (iPhone).
+  - The `vite preview` static build covers the whole flow, with training in the page, the live test and the download.
+  - It also covers the device benchmark and field test, the microphone dialog, and runtime parity.
+  - Chromium needed one fix: caching a response clone while reading the original failed with "network error", so files are cached once fully read.
+
+**Open, before this could replace the server:**
+- **The 230 MB first download** is fine on a desktop and heavy on mobile data. The 131 MB variant costs 1.2 points.
+- **Not measured on a phone yet:** training speed, memory (the compute worker holds about 230 MB of base data, plus 4 encoder workers), and whether iOS keeps the tab alive for the training. The tab must stay open while training.
+- **Browser storage is best-effort.** Under storage pressure the browser may evict the cache and the recordings. The app doesn't call `navigator.storage.persist()`, because Firefox prompts for it. The downloaded zip is the durable copy.
+- **The quality check runs under Node,** not in a browser. The browser runs differ only in the wasm build's kernels, which `runtime.spec.ts` holds to golden parity.
 
 ## 13. Decisions
 

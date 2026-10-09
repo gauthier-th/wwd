@@ -15,8 +15,8 @@ export function Layout() {
       <Outlet />
       <footer>
         {base ? <>Base model {base.version}. </> : null}
-        Trained with the Multilingual Spoken Words Corpus (MLCommons, CC-BY 4.0). Your recordings stay on
-        this server until you delete them.
+        Trained with the Multilingual Spoken Words Corpus (MLCommons, CC-BY 4.0). Everything happens in this
+        browser: your recordings, trainings and models never leave it.
       </footer>
     </div>
   );

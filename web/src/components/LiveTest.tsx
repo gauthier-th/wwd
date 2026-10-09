@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { artifactUrl, fetchBytes, type OperatingPoint, type Training } from "../api";
 import { createAudioContext, startDetector, startMic, type DetectorHandle, type MicCapture } from "../audio/pipeline";
 import { cssVar } from "../format";
+import { thresholdOf } from "./DetectorSettings";
 import { micError } from "./MicSettings";
 
 const HISTORY = 160; // ticks on screen: about 15 s
@@ -119,7 +120,7 @@ export function LiveTest({ training, point, kind, gate }: {
   const detector = useRef<DetectorHandle | null>(null);
   const mic = useRef<MicCapture | null>(null);
   const bytes = useRef<Partial<Record<ModelKind | "vad", Promise<ArrayBuffer>>>>({});
-  const threshold = point[kind].threshold;
+  const threshold = thresholdOf(point, kind);
 
   const load = (name: ModelKind | "vad") =>
     (bytes.current[name] ??= fetchBytes(artifactUrl(training.id, name === "vad" ? "vad.onnx" : FILES[name])));

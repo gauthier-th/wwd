@@ -1,5 +1,6 @@
-// The whole app against a real API on a tiny base model (e2e/api-server.sh): create a wake word,
-// record and import takes, train, listen live with the trained files, download, delete.
+// The whole app as static files, on a tiny base model (e2e/static-server.sh): create a wake
+// word, record and import takes, train in the browser, listen live with the trained file,
+// download, delete.
 
 import { fileURLToPath } from "node:url";
 
@@ -61,7 +62,7 @@ test("record, train, test live and download a wake word", async ({ page, browser
   // Each change starts a fresh view (the new detector numbers its ticks from 0).
   const shown = async () => Number(await page.getByTestId("live-chart").getAttribute("data-shown"));
   await expect.poll(shown, { timeout: 30_000 }).toBeGreaterThanOrEqual(40);
-  await page.getByRole("button", { name: "Small (int8)" }).click();
+  await expect(page.getByRole("button", { name: "Small (int8)" })).toHaveCount(0); // the browser builds fp32 only
   await page.getByTestId("gate").uncheck();
   await page.getByTestId("sensitivity").fill("5");
   await expect.poll(shown, { timeout: 5_000 }).toBeLessThan(40);
@@ -72,12 +73,13 @@ test("record, train, test live and download a wake word", async ({ page, browser
   await page.getByTestId("live-toggle").click();
   await expect(page.getByTestId("live-toggle")).toHaveText("Start listening");
 
-  // Download at the chosen sensitivity: the same files with their thresholds rewritten.
-  const href = await page.getByTestId("bundle-link").getAttribute("href");
-  expect(href).toContain("fa_per_hour=5");
-  const zip = await page.request.get(href!);
-  expect(zip.status()).toBe(200);
-  expect((await zip.body()).subarray(0, 2).toString()).toBe("PK");
+  // Download at the chosen sensitivity: the same file with its threshold rewritten, zipped here.
+  const [download] = await Promise.all([page.waitForEvent("download"), page.getByTestId("bundle-link").click()]);
+  expect(download.suggestedFilename()).toBe("wake-word.zip");
+  const fs = await import("node:fs");
+  const zip = fs.readFileSync(await download.path());
+  expect(zip.subarray(0, 2).toString()).toBe("PK");
+  expect(zip.includes(Buffer.from("wake-word/model.onnx"))).toBe(true);
 
   // Delete everything.
   await page.getByRole("link", { name: "← Recordings" }).click();

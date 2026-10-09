@@ -46,10 +46,14 @@ export function Waveform({ samples, height = 40 }: { samples: Float32Array | und
 function PlayButton({ url }: { url: string }) {
   const [playing, setPlaying] = useState(false);
   const audio = useRef<HTMLAudioElement | null>(null);
-  useEffect(() => () => audio.current?.pause(), []);
-  const toggle = () => {
+  useEffect(() => () => {
+    audio.current?.pause();
+    if (audio.current) URL.revokeObjectURL(audio.current.src);
+  }, []);
+  const toggle = async () => {
     if (!audio.current) {
-      audio.current = new Audio(url);
+      // Stored in this browser: play it from an object URL.
+      audio.current = new Audio(URL.createObjectURL(new Blob([await fetchBytes(url)], { type: "audio/wav" })));
       audio.current.onended = () => setPlaying(false);
     }
     if (playing) {
@@ -62,7 +66,7 @@ function PlayButton({ url }: { url: string }) {
     }
   };
   return (
-    <button className="btn btn-small" onClick={toggle} aria-label={playing ? "Stop" : "Play"}>
+    <button className="btn btn-small" onClick={() => void toggle()} aria-label={playing ? "Stop" : "Play"}>
       {playing ? "■" : "▶"}
     </button>
   );

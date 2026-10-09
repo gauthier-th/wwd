@@ -10,7 +10,7 @@ import { isFinal, useLanguages, useWakeWord } from "../hooks";
 import { forgetWakeWord, rememberWakeWord } from "../recent";
 
 const TARGET_TAKES = 10;
-const MIN_POSITIVES = 3; // server/api.py MIN_POSITIVES
+const MIN_POSITIVES = 3; // local/backend.ts MIN_POSITIVES (server/api.py's)
 const TARGETS = [0.25, 0.5, 1, 2];
 
 export function Steps({ current }: { current: 0 | 1 | 2 }) {

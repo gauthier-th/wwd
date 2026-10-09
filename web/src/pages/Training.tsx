@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 
 import { artifactUrl, bundleUrl, type Report, type Training } from "../api";
@@ -5,6 +6,8 @@ import { DetectorSettings, useDetectorChoice } from "../components/DetectorSetti
 import { LiveTest } from "../components/LiveTest";
 import { hours, pct, seconds } from "../format";
 import { useTraining, useTrainingEvents, useWakeWord } from "../hooks";
+import { onDownload } from "../local/backend";
+import { download } from "../local/files";
 import { Steps } from "./WakeWord";
 
 const STAGES: [string, string][] = [
@@ -79,15 +82,31 @@ function Progress({ training, events }: { training: Training; events: { stage: s
           </li>
         ))}
       </ol>
-      <p className="muted small" style={{ marginTop: 8 }}>You can leave this page: training continues on the server.</p>
+      <BaseDownload />
+      <p className="muted small" style={{ marginTop: 8 }}>
+        Training runs in this browser: keep this tab open. You can move around the app meanwhile.
+      </p>
     </section>
+  );
+}
+
+/** The base model's files download once, before the first training (then they're cached). */
+function BaseDownload() {
+  const [state, setState] = useState<{ loaded: number; total: number } | null>(null);
+  useEffect(() => onDownload((loaded, total) => setState({ loaded, total })), []);
+  if (!state || state.loaded >= state.total) return null;
+  const mb = (n: number) => Math.round(n / 1e6);
+  return (
+    <p className="small" data-testid="base-download" style={{ marginTop: 8 }}>
+      Downloading the base model, once: {mb(state.loaded)} of {mb(state.total)} MB.
+    </p>
   );
 }
 
 function Done({ training, report }: { training: Training; report: Report }) {
   const settings = useDetectorChoice(report);
   const { point, kind, gate } = settings.choice;
-  const verify = report.verification[kind];
+  const verify = report.verification[kind] ?? report.verification.fp32;
   const cv = report.cross_validation;
   const weak = cv?.per_recording.filter((r) => r.weak).length ?? 0;
 
@@ -141,16 +160,18 @@ function Done({ training, report }: { training: Training; report: Report }) {
       <section className="card" data-testid="download">
         <h2>Download</h2>
         <p className="muted">
-          Both model files, the speech detector and the settings, at the sensitivity chosen above. They run with
+          The model file, the speech detector and the settings, at the sensitivity chosen above. They run with
           onnxruntime in Python (Raspberry Pi, any computer) or onnxruntime-web in a browser.
         </p>
         <div className="row">
-          <a className="btn btn-primary" href={bundleUrl(training, point.fa_per_hour)} download data-testid="bundle-link">
+          <button type="button" className="btn btn-primary" data-testid="bundle-link"
+                  onClick={() => void download(bundleUrl(training, point.fa_per_hour), "wake-word.zip", "application/zip")}>
             Download the model (.zip)
-          </a>
-          <a className="btn btn-ghost btn-small" href={artifactUrl(training.id, "report.json")} download>
+          </button>
+          <button type="button" className="btn btn-ghost btn-small"
+                  onClick={() => void download(artifactUrl(training.id, "report.json"), "report.json", "application/json")}>
             Training report
-          </a>
+          </button>
         </div>
         <pre className="paragraph small" style={{ overflowX: "auto" }}>
           pip install -r runtime/requirements.txt{"\n"}python -m runtime.listen model.onnx --vad vad.onnx

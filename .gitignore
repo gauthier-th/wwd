@@ -17,3 +17,4 @@ models/
 
 # web end-to-end test data (tiny base model, fixtures, database)
 web/.e2e/
+web/public/base/
