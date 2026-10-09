@@ -67,6 +67,11 @@ jobs:
       - run: uv run python -m scripts.make_web_fixtures
       - run: pnpm --filter @wwd/web test # the ported maths against Python, a whole training in Node
       - run: pnpm --filter @wwd/web exec playwright install --with-deps chromium firefox webkit
+      - name: Sound server (Firefox's Web Audio doesn't start without an output; no sound card here)
+        run: |
+          sudo apt-get install -y --no-install-recommends pulseaudio pulseaudio-utils
+          pulseaudio --start --exit-idle-time=-1
+          pactl list short sinks # a null sink
       - run: pnpm --filter @wwd/web test:e2e
 
   site:
