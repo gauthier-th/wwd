@@ -40,6 +40,8 @@ const TEACHER = (model: string) => `## Models
 
 `;
 
+const REPO = "https://github.com/gauthier-th/wwd";
+
 const README = (p: { wakeWord: string; language: string; target: number; threshold: number; hours: number;
                      verified: string }) => `# Wake word "${p.wakeWord}" (${p.language})
 
@@ -52,22 +54,15 @@ const README = (p: { wakeWord: string; language: string; target: number; thresho
 Trained in the browser. The threshold, calibrated for ${p.target} false accepts per hour on
 ${p.hours.toFixed(1)} h of long-form audio, is **${p.threshold.toFixed(4)}**.${p.verified}
 
-## Python (Raspberry Pi, any computer)
+## Run it
 
-Copy the \`runtime/\` folder of the wwd repository, then:
+The runtime is in ${REPO}: \`runtime/\` for Python (a Raspberry Pi or any computer),
+\`runtime/js/\` for browsers and Node. From a clone of it:
 
     pip install -r runtime/requirements.txt
-    python -m runtime.listen model.onnx --vad vad.onnx
+    python -m runtime.listen path/to/model.onnx --vad path/to/vad.onnx
 
-## Browser
-
-\`@wwd/runtime\` runs the same files on onnxruntime-web (wasm):
-
-    const detector = await Detector.create(modelBytes, vadBytes);
-    const events = await detector.process(samples16k);
-
-The detector logic (ticks, speech gate, smoothing, refractory period) is specified in
-\`runtime/SPEC.md\`.
+Its README shows how to use the detector in your own code.
 `;
 
 async function sha256(data: Uint8Array): Promise<string> {

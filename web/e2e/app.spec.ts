@@ -14,7 +14,7 @@ test("record, train, test live and download a wake word", async ({ page, browser
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
 
-  await page.goto("/");
+  await page.goto("./");
   await page.getByLabel("Wake word").fill("abad");
   await page.getByLabel("Language").selectOption("fr");
   await page.getByRole("button", { name: "Start recording" }).click();
@@ -22,7 +22,7 @@ test("record, train, test live and download a wake word", async ({ page, browser
   await expect(page.getByRole("heading", { name: "“abad”" })).toBeVisible();
   await expect(page.locator(".paragraph")).toContainText("La matinée était calme");
 
-  // The wake word: a take recorded elsewhere (a Pi, another app), cut into 6 clips by the server.
+  // The wake word: a take recorded elsewhere (a Pi, another app), cut into 6 clips by the upload checks.
   await page.getByTestId("import-positive").setInputFiles(fixture("take.wav"));
   await expect(page.getByTestId("clip")).toHaveCount(6);
 

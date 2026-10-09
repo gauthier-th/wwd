@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { createBrowserRouter, RouterProvider } from "react-router";
+import { createHashRouter, RouterProvider } from "react-router";
 
 import { ApiError } from "./api";
 import { DevicePage } from "./pages/Device";
@@ -21,7 +21,9 @@ const queryClient = new QueryClient({
   },
 });
 
-const router = createBrowserRouter([
+// Hash URLs (/#/w/…): any static host serves every page, at any sub-path, without a
+// fallback rule.
+const router = createHashRouter([
   {
     element: <Layout />,
     errorElement: <ErrorPage />,

@@ -8,7 +8,7 @@ import { expect, test, type Page } from "@playwright/test";
 const fixture = (name: string) => fileURLToPath(new URL(`../.e2e/fixtures/${name}`, import.meta.url));
 
 async function trainedModel(page: Page): Promise<string> {
-  await page.goto("/");
+  await page.goto("./");
   await page.getByLabel("Wake word").fill("abad");
   await page.getByLabel("Language").selectOption("fr");
   await page.getByRole("button", { name: "Start recording" }).click();
@@ -27,7 +27,10 @@ test("benchmark and field test on this device", async ({ page }) => {
 
   await page.getByTestId("device-link").click();
   await expect(page).toHaveURL(/\/device$/);
-  await page.goto(`${trainingUrl}/device?upload_s=3`);
+  const short = new URL(trainingUrl); // ?upload_s goes before the #/route: the page reads location.search
+  short.search = "?upload_s=3";
+  short.hash += "/device";
+  await page.goto(short.href);
 
   await page.getByTestId("bench-run").click();
   await expect(page.getByTestId("bench-results").locator("tbody tr")).toHaveCount(2, { timeout: 120_000 }); // fp32, gate on and off

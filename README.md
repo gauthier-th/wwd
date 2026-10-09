@@ -1,105 +1,82 @@
-# wwd: few-shot wake-word trainer
+# Wake Word Trainer
 
-Record a wake word in the browser, fine-tune on the server, and get ONNX files that run
-identically on onnxruntime (Python, e.g. a Raspberry Pi) and onnxruntime-web (wasm). See
-[PLAN.md](PLAN.md) for the design and [runtime/SPEC.md](runtime/SPEC.md) for the runtime contract.
+Make your own wake word from two minutes of recordings, in 12 languages. Training runs in your
+browser and gives you a small ONNX model that listens on a Raspberry Pi, a computer or a web page.
 
-## Setup
+**→ [Open the app](https://gauthier-th.github.io/wwd/)**
 
-```sh
-uv sync --extra training      # CUDA torch (GPU box); use --extra server for CPU-only
-pnpm install
-```
+No install, no account, no server: your recordings and models stay in your browser.
 
-## Fine-tuning server
+## Make a wake word
 
-```sh
-uv run --extra server uvicorn server.api:app       # API on :8000 (docs at /docs)
-uv run --extra server python -m server.worker      # fine-tune jobs, one at a time
-```
+1. Enter the wake word and its language. Two words ("hey jarvis") work better than one short word.
+2. Record with the microphone the wake word will be used with: the wake word 10 times, a
+   paragraph read aloud, and 15 seconds of room sound.
+3. Train: under a minute, about 15 seconds on a recent desktop. The first time also downloads the
+   base model (230 MB, kept for later visits). Keep the tab open while it trains.
+4. Try it live, adjust the sensitivity if needed, and download the zip.
 
-On the GPU box, `--extra training` runs both too (it carries the API stack).
+Languages: English, German, French, Catalan, Spanish, Persian, Italian, Russian, Polish, Basque,
+Welsh and Kinyarwanda (much less accurate than the others).
 
-Base models are read from `models/base/<version>/` (`WWD_MODELS`, `WWD_BASE_VERSION`); the
-database and recordings go to `data/server/` (`WWD_SERVER_DATA`). `scripts/m2_smoke.sh [lang]`
-drives a whole run with curl against a real base model and checks the bundle in both runtimes.
+## Use the model
 
-## Base models
+The zip holds `model.onnx` (the detector, its settings included) and `vad.onnx` (a voice
+detector, so the model only runs while someone speaks).
 
-Built offline on a GPU by `training/` (PLAN.md §7). The newest is the server's default; each
-training keeps the base it was made with.
+### Python: Raspberry Pi or any computer
 
 ```sh
-scripts/m1_pipeline.sh v0.1   # data download, splits, student-only base model, evaluations
-scripts/m5_pipeline.sh v1     # XLS-R teacher, its embedding cache, distilled student, evaluations
+git clone --depth 1 https://github.com/gauthier-th/wwd && cd wwd
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r runtime/requirements.txt
+python -m runtime.listen path/to/model.onnx --vad path/to/vad.onnx   # prints each detection
 ```
 
-Both run for hours and resume where they stopped: start them detached, e.g.
-`setsid nohup scripts/m5_pipeline.sh v1 >> data/m5.log 2>&1 < /dev/null &`.
+On a Raspberry Pi, use the 64-bit OS and `sudo apt install libportaudio2` first. In your own code:
 
-## Web app (static, trains in the browser)
+```python
+import sounddevice as sd
+from runtime.detector import Detector
 
-On this branch the web app needs no server. Recording, the upload checks, training,
-calibration, the live test and the download all run in the browser (Web Workers, onnxruntime-web
-wasm). Recordings, trainings and models stay in IndexedDB, so the site is plain static files.
-
-1. Export the base model's files for the browser, once per base model (about 230 MB):
-
-   ```sh
-   uv run --extra training python -m scripts.export_web_assets models/base/v1   # -> web/public/base/
-   ```
-
-2. Build, then serve `web/dist/` with any static file server:
-
-   ```sh
-   pnpm --filter @wwd/web build        # WWD_BASE_PATH=/sub/path/ to serve it under a sub-path
-   pnpm --filter @wwd/web preview      # or: pnpm --filter @wwd/web dev
-   ```
-
-The first training downloads the base model's files (about 230 MB), and Cache Storage keeps them
-for later visits. Browsers only open the microphone on `https://` or `localhost`, so serve the
-site over HTTPS, for example GitHub Pages or `cloudflared tunnel --url http://localhost:4173`.
-No cross-origin-isolation headers are needed.
-
-The fine-tuning server (`server/`) still exists, and the evaluation tools use its quick mode,
-but this app doesn't call it.
-
-## Tests
-
-```sh
-uv run pytest                 # core, server (tiny base model) + Python runtime (golden parity)
-uv run ruff check . && uv run lint-imports
-pnpm --filter @wwd/runtime test        # JS runtime, onnxruntime-web wasm under Node
-uv run python -m scripts.make_web_fixtures   # tiny base model + web assets + Python goldens
-pnpm --filter @wwd/web test            # app unit tests: the ported maths against Python,
-                                       # a whole browser training on the tiny base under Node
-pnpm --filter @wwd/web test:e2e        # Chromium, Firefox, WebKit (iPhone): the static app on the
-                                       # tiny base, training in the browser; runtime parity, the mic
-
-# Browser training against the server's, on 24 held-out words (needs training/ data):
-uv run --extra training python -m scripts.web_quality prepare data/web_quality
-WWD_QUALITY=../data/web_quality pnpm --filter @wwd/web exec vitest run quality
-uv run --extra training python -m scripts.web_quality score data/web_quality
+detector = Detector("model.onnx", "vad.onnx")
+with sd.InputStream(samplerate=16000, channels=1, dtype="float32") as mic:
+    while True:
+        audio, _ = mic.read(1536)
+        for event in detector.process(audio[:, 0]):  # 16 kHz mono, any chunk size
+            print(f"Wake word! (score {event.score:.2f})")
 ```
 
-## Run a model
+[runtime/README.md](runtime/README.md) shows how to measure CPU use and false alarms on a device.
 
-```sh
-python -m runtime.listen model.onnx --vad vad.onnx      # files from the downloaded bundle
-python -m runtime.listen --record take.wav              # a take from the device's own mic,
-                                                        # for the app's "Import a file instead"
+### JavaScript: browser or Node
+
+`runtime/js/src/` runs the same files with onnxruntime-web. Copy it into your project and add
+`onnxruntime-web@1.30.0`:
+
+```ts
+import { Detector } from "./runtime";
+
+const detector = await Detector.create("model.onnx", "vad.onnx"); // URLs or the files' bytes
+const events = await detector.process(samples); // 16 kHz mono Float32Array, any length
 ```
 
-`/harness.html` in the web app runs the M0 runtime checks (golden parity, microphone pipeline).
+To port the detector to another language, follow [runtime/SPEC.md](runtime/SPEC.md).
 
-## Measure a device (M4)
+## How it works
 
-- **Raspberry Pi or any Python host:** `scripts/pack_runtime.sh bundle.zip` builds
-  `dist/wwd-runtime.tar.gz`; [runtime/README.md](runtime/README.md) walks through parity tests,
-  `python -m runtime.bench` and a 24 h field test (`runtime.listen --log`, then `runtime.fieldreport`).
-- **Phone:** open a finished model in the app, then "Measure this device". On Android over USB,
-  `adb reverse tcp:8000 tcp:8000` lets the phone open `http://localhost:8000` with the microphone.
-- **aarch64 without a Pi:** `scripts/test_aarch64.sh` (needs `qemu-user-static`).
+A multilingual speech encoder, trained once on the Multilingual Spoken Words Corpus and distilled
+from XLS-R, turns 1.5 s of audio into a vector. Training fits a small classifier on your
+recordings, with added noise and reverb, against 200,000 other words. It then sets the threshold
+on 14 hours of speech and noise, so false alarms stay near the rate you chose. Tested on 240 words
+it never saw, each enrolled from 10 recordings, it detects 82% of utterances by other speakers at
+about 0.7 false alarms per hour.
 
-Regenerate the golden test data (stub models, expected values) with
-`uv run --extra training python -m scripts.make_golden`.
+To run the app yourself, run the tests or train a base model, see [DEVELOPMENT.md](DEVELOPMENT.md).
+
+## License
+
+The code is under the [MIT license](LICENSE). The base model is trained on the Multilingual Spoken
+Words Corpus (MLCommons, CC-BY 4.0), with MUSAN, RIRS_NOISES, Multilingual LibriSpeech and
+LibriSpeech, and distilled from XLS-R (Apache-2.0). The voice detector is Silero VAD (MIT). Every
+downloaded model includes an `ATTRIBUTION.md` with the details.

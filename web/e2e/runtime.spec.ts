@@ -4,7 +4,7 @@ async function runHarness(page: Page, query: string) {
   const logs: string[] = [];
   page.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`));
   page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));
-  await page.goto(`/harness.html?${query}`);
+  await page.goto(`harness.html?${query}`);
   await page.waitForFunction(() => window.harness && window.harness.status !== "running", null, {
     timeout: 170_000,
   });

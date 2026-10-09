@@ -71,7 +71,7 @@ for `model.int8.onnx`.{verified}
 
 ## Python (Raspberry Pi, any computer)
 
-Copy the `runtime/` folder of the wwd repository, then:
+Copy the `runtime/` folder of https://github.com/gauthier-th/wwd, then:
 
     pip install -r runtime/requirements.txt
     python -m runtime.listen model.onnx --vad vad.onnx

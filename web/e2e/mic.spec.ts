@@ -6,7 +6,7 @@ import { expect, test } from "@playwright/test";
 test("microphone settings", async ({ page, browserName }) => {
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  await page.goto("/");
+  await page.goto("./");
   await page.getByTestId("mic-button").click();
   const dialog = page.getByTestId("mic-dialog");
   await expect(dialog).toBeVisible();

@@ -16,7 +16,8 @@ export function Layout() {
       <footer>
         {base ? <>Base model {base.version}. </> : null}
         Trained with the Multilingual Spoken Words Corpus (MLCommons, CC-BY 4.0). Everything happens in this
-        browser: your recordings, trainings and models never leave it.
+        browser: your recordings, trainings and models never leave it.{" "}
+        <a href="https://github.com/gauthier-th/wwd">Source code and docs</a>.
       </footer>
     </div>
   );

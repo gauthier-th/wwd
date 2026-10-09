@@ -1,6 +1,6 @@
 # Few-shot wake-word trainer: plan
 
-Last updated: 2026-10-09 (branch browser-only: the whole app runs in the browser, served as static files; §12.6)
+Last updated: 2026-10-09. The whole app now runs in the browser and is published as static files on GitHub Pages (§12.6). Usage docs: README.md and DEVELOPMENT.md.
 
 ## 1. Goal and scope
 
@@ -165,7 +165,7 @@ wwd/
 │   └── js/               # TS runtime @wwd/runtime: same detector + VAD wrapper
 ├── web/                  # React + Vite + TypeScript; src/audio = worklet, worker, pipeline
 ├── scripts/              # make_golden.py (runtime/testdata), m1_pipeline.sh, m2_smoke.sh + check_bundle.py
-├── .github/workflows/    # ci.yml: Python, JS (wasm in Node), browsers
+├── .github/workflows/    # ci.yml: Python, JS (wasm in Node), browsers, site → GitHub Pages
 ├── pnpm-workspace.yaml   # web, runtime/js
 ├── data/                 # gitignored: downloads, extracted clips, memmaps
 └── models/               # gitignored: base/<ver>/
@@ -697,7 +697,7 @@ The base model is BC-ResNet (204k parameters, 256-dim embedding), trained for 80
 2. **Close more of the teacher gap.** The student has captured 30–45% of it. Options: distill on long-form speech windows too (unlabeled, and where false accepts happen), a longer schedule, or a width-40 student if devices can afford the cost (§12.4 has the Pi's headroom).
 3. **Kinyarwanda:** better embeddings didn't help it end to end. Look at its false accepts and its long, agglutinative words.
 
-### 12.6 Experiment: everything in the browser (branch `browser-only`)
+### 12.6 Everything in the browser (on `main` since 2026-10-09)
 
 **Goal:** the web app does the whole job in the browser, served as static files with no server. That covers recording, upload checks, training, calibration, verification, the live test, the download and the device tests. This lifts §1's "training on the device" exclusion for browsers. Quick mode makes it possible: the encoder is frozen and the head is fitted in closed form (§9.3), so a training is about 4,200 encoder forward passes plus vector maths, with no backprop and no WebGPU.
 
@@ -758,7 +758,9 @@ What the reductions cost, measured with `eval_e2e` on the 240 words (fed back in
   - It also covers the device benchmark and field test, the microphone dialog, and runtime parity.
   - Chromium needed one fix: caching a response clone while reading the original failed with "network error", so files are cached once fully read.
 
-**Open, before this could replace the server:**
+**Publishing** (`.github/workflows/ci.yml`): every push builds the site. On `main`, once every test job passes, the CI downloads the base model's files from a GitHub release (`base.tar.gz`, 208 MB, made by `scripts/release_base.sh`; too big for git, and one file is 138 MB), builds under the Pages sub-path and deploys. The router uses hash URLs (`/wwd/#/w/…`) so every page loads from any static host without a fallback rule. The end-to-end tests run the build under `/wwd/` too.
+
+**Open:**
 - **The 230 MB first download** is fine on a desktop and heavy on mobile data. The 131 MB variant costs 1.2 points.
 - **Not measured on a phone yet:** training speed, memory (the compute worker holds about 230 MB of base data, plus 4 encoder workers), and whether iOS keeps the tab alive for the training. The tab must stay open while training.
 - **Browser storage is best-effort.** Under storage pressure the browser may evict the cache and the recordings. The app doesn't call `navigator.storage.persist()`, because Firefox prompts for it. The downloaded zip is the durable copy.

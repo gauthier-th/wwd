@@ -1,18 +1,20 @@
 # wwd runtime on a device
 
-Runs a downloaded wake-word bundle with onnxruntime and numpy only, on a Raspberry Pi or any
-Python 3.10+ machine. `scripts/pack_runtime.sh` builds this kit: the `runtime/` package with its
-golden tests, plus the bundle if you give it one.
+Runs a downloaded wake-word model with onnxruntime and numpy only, on a Raspberry Pi or any
+Python 3.10+ machine. The steps below test the device with your model: put its files in
+`bundle/` (`unzip -j model.zip -d bundle`).
 
-## Install (Raspberry Pi OS, 64-bit)
+## Install
 
-onnxruntime ships wheels for 64-bit ARM (`aarch64`) only: use the 64-bit Raspberry Pi OS. On a Pi 4
-or 5, `uname -m` must print `aarch64`.
+On a Raspberry Pi, use the 64-bit Raspberry Pi OS: onnxruntime has no wheels for 32-bit ARM.
 
-    sudo apt install python3-venv libportaudio2
-    tar xzf wwd-runtime.tar.gz && cd wwd-runtime
+    sudo apt install git python3-venv libportaudio2
+    git clone --depth 1 https://github.com/gauthier-th/wwd && cd wwd
     python3 -m venv .venv && . .venv/bin/activate
     pip install -r runtime/requirements.txt pytest
+
+No git on the device? On another machine, `scripts/pack_runtime.sh model.zip` builds
+`dist/wwd-runtime.tar.gz` with the runtime and the model; copy and extract it instead.
 
 ## 1. Parity: same results as everywhere else
 
@@ -32,7 +34,7 @@ A take recorded here is also the best training data for this device: import it i
 
 ## 3. Benchmark: CPU and latency
 
-    python -m runtime.bench bundle/model.onnx bundle/model.int8.onnx --vad bundle/vad.onnx --json bench.json
+    python -m runtime.bench bundle/model.onnx --vad bundle/vad.onnx --json bench.json
 
 Streams 60 s of speech one tick (96 ms) at a time, as live, through each file with the speech gate
 on and off. "CPU % (real time)" is the share of one core the detector needs to keep up.

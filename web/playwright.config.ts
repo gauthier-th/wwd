@@ -4,6 +4,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 // Chromium plays this file as the fake microphone; Firefox's fake device generates a tone.
 const speech = fileURLToPath(new URL("../runtime/testdata/audio/speech.wav", import.meta.url));
+const port = process.env.WWD_E2E_PORT ?? "4173";
 
 export default defineConfig({
   testDir: "e2e",
@@ -14,11 +15,12 @@ export default defineConfig({
   // are covered, and every training runs in the browser under test.
   webServer: {
     command: "bash e2e/static-server.sh",
-    url: "http://localhost:4173/harness.html",
+    url: `http://localhost:${port}/wwd/harness.html`,
     reuseExistingServer: !process.env.CI,
     timeout: 300_000,
   },
-  use: { baseURL: "http://localhost:4173" },
+  // Under a sub-path, as on GitHub Pages: pages are opened relative to it ("./").
+  use: { baseURL: `http://localhost:${port}/wwd/` },
   projects: [
     {
       name: "chromium",
