@@ -1,4 +1,4 @@
-// Wake words created on this device. There are no accounts before M6, so this list is the way
+// Wake words created on this device. There are no accounts, so this list is the way
 // back to them; it lives in this browser only.
 
 export interface RecentWakeWord {

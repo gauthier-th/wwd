@@ -1,6 +1,6 @@
 # Few-shot wake-word trainer: plan
 
-Last updated: 2026-10-09 (M5 done: base v1, distilled from an XLS-R teacher, beats v0.1 end to end)
+Last updated: 2026-10-09 (M5 done: base v1, distilled from an XLS-R teacher, beats v0.1 end to end; M6 dropped)
 
 ## 1. Goal and scope
 
@@ -13,7 +13,7 @@ A user records a few examples of a wake word in the browser. The server fine-tun
   - `training/` builds the multilingual base model offline, on a GPU, before any end user touches the app.
   - `server/` runs the per-user fine-tuning.
 
-**Out of scope for v1:** wake words enrolled from text, training on the device, WebGPU/WebGL backends, languages outside the 12, and native mobile apps. The ONNX files stay compatible with ORT Mobile, so a native app remains possible later.
+**Out of scope for v1:** wake words enrolled from text, training on the device, WebGPU/WebGL backends, languages outside the 12, and native mobile apps. The ONNX files stay compatible with ORT Mobile, so a native app remains possible later. Also out of scope (the former M6, dropped 2026-10-09): a GPU quality mode, multi-speaker enrollment, accounts and authentication, cloud storage, and a retention policy.
 
 ## 2. Prerequisites (do these before M0)
 
@@ -319,12 +319,12 @@ The bank is a fixed sample of clips taken from the MSWC download that `training/
 
 **Stack:** FastAPI (native SSE), Pydantic v2, SQLModel on SQLite (Postgres later), soxr, soundfile, torch (CPU), onnx, and `runtime`.
 - **Jobs:** a DB table, taken one at a time by a single worker process. Move to Celery or arq only if scale requires it.
-- **Storage:** a small interface over the local filesystem now (`server/storage.py`), S3 later.
+- **Storage:** a small interface over the local filesystem (`server/storage.py`).
 - **Configuration:** environment variables (`server/settings.py`): `WWD_SERVER_DATA`, `WWD_MODELS`, `WWD_BASE_VERSION`, `WWD_DEVICE`, `WWD_VERIFY_WORKERS`.
 
 ### 9.1 API
 
-Built in M2 (`server/api.py`; OpenAPI docs at `/docs`). There's no authentication before M6; IDs are random UUIDs.
+Built in M2 (`server/api.py`; OpenAPI docs at `/docs`). There's no authentication: IDs are random UUIDs, so a wake word is reachable only through its link.
 
 ```
 GET    /api/health
@@ -350,7 +350,7 @@ GET    /api/trainings/{tid}/bundle.zip?fa_per_hour=x   the bundle at another ope
 - **`WWD_WORKER_THREAD=1`** runs the worker inside the API process, for development and the end-to-end tests. Production runs `python -m server.worker` separately.
 
 - **Jobs:** `POST …/trainings` snapshots the sample IDs and queues a `Training` row. `python -m server.worker` claims queued rows one at a time; progress goes to `TrainingEvent` rows, which the SSE endpoint streams (it resumes after `Last-Event-ID`). A worker that starts finds jobs left `running` by a crash and queues them again.
-- **One active training per wake word** (409 otherwise). Quality mode returns 422 until M6.
+- **One active training per wake word** (409 otherwise). `mode` accepts only `quick` (422 otherwise).
 - **Deletion while training:** the worker checks between stages, stops, and removes what it wrote.
 - **Storage:** everything a user owns lives under `wakewords/<id>/` (originals, clips, trainings), so deletion is one prefix. SQLite runs in WAL mode, shared by the API and the worker.
 
@@ -365,7 +365,7 @@ Each upload goes through these steps (`server/audio.py`):
 6. **Outliers:** each accepted recording's cosine to the prototype of the others, through `encoder.onnx`. It's flagged below 0.5, or 0.2 below the median. Flagged recordings are left out of training; the UI should offer a re-record.
 7. **Other speech** needs at least 2 s of speech. **Ambience** only has to be something other than digital silence.
 
-### 9.3 Quick mode (default)
+### 9.3 Quick mode
 
 Target: under 2 minutes on CPU. No GPU on the server.
 
@@ -399,12 +399,6 @@ Target: under 2 minutes on CPU. No GPU on the server.
    - **Report:** false accepts per hour for fp32 and int8 with the gate on and off, enrollment detections, parity, fold recall and per-stage timings, in `report.json` and the training row.
 8. **Bundle** (`server/bundle.py`): `model.onnx`, `model.int8.onnx`, `model.json` (the metadata, file hashes and evaluation), `vad.onnx`, Silero's license, `ATTRIBUTION.md`, a `README.md`, and `bundle.zip` of all of them.
 
-### 9.4 Quality mode (M6)
-
-- Unfreeze the last encoder block, and use raw-audio negatives from a subset of the bank's audio.
-- Needs a GPU and takes about 10 minutes.
-- The full graph is exported from torch, then quantized with a calibration subset that ships with the base model.
-
 ## 10. `web/`: React app
 
 **Stack:** Vite, React 19, TypeScript, TanStack Query, react-router 8, and `runtime/js` (onnxruntime-web, wasm). Plain CSS with light and dark tokens, mobile first. Built in M3.
@@ -424,7 +418,7 @@ Target: under 2 minutes on CPU. No GPU on the server.
 - Vite serves the ORT `.wasm` files. In development it proxies `/api` to the server (`WWD_API`); in production the server serves the app.
 
 **Flow:**
-1. **Home** (`/`): the wake-word label and the language, as native names. Wake words of 4 letters or fewer get a warning; M1 measured them at about 50% recall. Wake words made on this device are listed from `localStorage`, since there are no accounts before M6.
+1. **Home** (`/`): the wake-word label and the language, as native names. Wake words of 4 letters or fewer get a warning; M1 measured them at about 50% recall. Wake words made on this device are listed from `localStorage`, since there are no accounts.
 2. **Recordings** (`/w/:id`): three cards. Each has a record button, a live speech light and a level meter, plus **Import a file instead**, for takes recorded elsewhere (`python -m runtime.listen --record` on a Pi).
    - **The wake word, 10 times in one take.** A live counter shows utterances as the server will cut them: `segments.ts` mirrors `server/audio.py` `speech_regions` and is unit-tested on the same cases. It warns when one utterance runs past 1.3 s, and stops by itself after the 10th utterance and a 0.8 s pause.
    - **Reading the paragraph** in the chosen language, right-to-left for Persian. Takes with under 2 s of speech are refused in the browser, before any upload.
@@ -480,7 +474,6 @@ Target: under 2 minutes on CPU. No GPU on the server.
 | **M3** ✅ | `web`: record → review → train → live test → download | **Done 2026-10-07, on emulated devices.** The full flow passes in Chromium, Firefox and WebKit (iPhone 15 emulation), in the browser end-to-end tests against a real API. With the real v0.1 model in Chromium, the live test detected 19 of 20 other speakers saying the word. Still to do on your side: a real iPhone over HTTPS (§2, item 5). See §12.3. |
 | **M4** ✅ | Devices: Pi 4/5 (Python ORT on aarch64), phone browser (wasm) | CPU %, latency and a 24 h real-room false-accept test (TV + speech) measured on each. **Done 2026-10-08, with a shortened field test (your call).** It runs on a Raspberry Pi 4B and in Chrome on Android. On the Pi 4: 40 ms per tick, 36–42% of one core. No false accepts in about 1 h on the Pi, 1 h on the phone and 3 h on a computer, for models calibrated to 0.25/h. The 24 h runs and the phone benchmark weren't done; the tooling is ready for them. See §12.4. |
 | **M5** ✅ | Base **v1**: XLS-R teacher + distillation | End-to-end metrics beat v0.1. Older user models keep their base version. **Done 2026-10-09.** End to end **82.4% recall at the 0.5 false accepts/h target** (v0.1: 77.0%), +4.6 points at the same measured rate. The shipped fp32 file: 85.2% (v0.1: 80.9%). Few-shot (10 clips) 96.7% (v0.1: 95.1%). Same student, so the same cost on every device. New trainings use v1; existing ones keep v0.1. See §12.5. |
-| **M6** | Quality mode, multi-speaker enrollment, auth, S3, retention policy | — |
 
 M2 and M3 can start right after M0, against the stub encoder, while M1 trains.
 
@@ -718,7 +711,6 @@ The base model is BC-ResNet (204k parameters, 256-dim embedding), trained for 80
 
 **Still open:**
 - Also export a shared `encoder.onnx` plus a small `head.onnx` per word, for devices that run several wake words?
-- Should the server get a GPU for quality mode?
 - Build a native phone app later?
 
 ## 14. Risks
@@ -728,7 +720,7 @@ The base model is BC-ResNet (204k parameters, 256-dim embedding), trained for 80
 - **Always-on listening in a phone browser** only works while the page is in the foreground; iOS Safari stops the mic when the screen locks. True background listening needs a native app, and the ONNX contract keeps that possible.
 - **Mismatch between the recording mic and the device mic.** Mitigated by EQ augmentation and by recording on the target device.
 - **Languages with little data** (cy, eu, pl, ru: about 110–140 h each) turned out fine (v1: 85–92% end to end). The weak one is **Kinyarwanda (44% in v1)**, despite 422 h: it has only 322 speakers, and its words are long and agglutinative. Distillation improved its few-shot recall but not its end-to-end recall (§12.5). Short wake words (4 characters or fewer) are weak in every language: 59% in v1, up from 50%.
-- **Privacy.** Voice recordings are personal data under GDPR. The delete endpoint exists (M2: it removes every file and row, and stops a running job). A retention policy and auth are M6.
+- **Privacy.** Voice recordings are personal data under GDPR. The delete endpoint exists (M2: it removes every file and row, and stops a running job). There's no retention policy and no authentication (out of scope, §1): recordings stay until their wake word is deleted, so the server suits personal use, not an open deployment.
 - **Reading paragraphs** (`server/languages.py`) were written without native speakers. The rw, fa, eu and cy texts are flagged `needs_review`.
 
 ## Sources

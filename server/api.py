@@ -85,7 +85,7 @@ class SampleOut(BaseModel):
 
 
 class TrainingIn(BaseModel):
-    mode: Literal["quick", "quality"] = "quick"
+    mode: Literal["quick"] = "quick"
     target_fa_per_hour: float = Field(0.5, gt=0, le=10)
     base_version: str | None = None
 
@@ -305,8 +305,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/wakewords/{wid}/trainings", status_code=202)
     def create_training(wid: str, body: TrainingIn) -> TrainingOut:
-        if body.mode == "quality":
-            raise HTTPException(422, "quality mode arrives in M6; use mode=quick")
         try:
             version = body.base_version or bases.default()
             bases.get(version)

@@ -11,7 +11,7 @@ from sqlmodel import Field, SQLModel, create_engine
 
 
 def new_id() -> str:
-    return uuid.uuid4().hex  # unguessable: there is no auth before M6
+    return uuid.uuid4().hex  # unguessable: there is no auth
 
 
 def now() -> datetime:

@@ -1,4 +1,4 @@
-"""Blob storage behind a small interface: local filesystem now, S3 later (PLAN.md §9).
+"""Blob storage behind a small interface: the local filesystem (PLAN.md §9).
 
 Keys are relative POSIX paths such as `wakewords/<id>/samples/<sid>.wav`. Everything a user
 owns lives under `wakewords/<id>/`, so deleting a wake word is one `delete_prefix`.
