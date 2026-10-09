@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from core.export import check_graph, read_metadata
 from runtime import Detector
-from server import audio
+from server import audio, bundle
 from server.api import create_app
 from server.bundle import ARTIFACTS, BUNDLE_FILES
 from server.tests.tiny_base import take
@@ -157,6 +157,14 @@ def test_full_flow(client, app, settings, speech, noise):
     with zipfile.ZipFile(io.BytesIO(files["bundle.zip"])) as zf:
         assert sorted(zf.namelist()) == sorted(f"wake-word/{n}" for n in BUNDLE_FILES)
         assert zf.read("wake-word/model.onnx") == files["model.onnx"]
+        assert "XLS-R" not in zf.read("wake-word/ATTRIBUTION.md").decode()  # tiny has no teacher
+    # a base distilled from XLS-R (M5) credits it
+    texts = bundle._texts({"fp32": read_metadata_bytes(files["model.onnx"]),
+                           "int8": read_metadata_bytes(files["model.int8.onnx"])},
+                          {**report, "base_teacher": {"model": "facebook/wav2vec2-xls-r-300m"}},
+                          dict.fromkeys(("model.onnx", "model.int8.onnx", "vad.onnx"), "0"),
+                          report["target_fa_per_hour"])
+    assert "huggingface.co/facebook/wav2vec2-xls-r-300m" in texts["ATTRIBUTION.md"].decode()
 
     # another operating point: same files, only the thresholds in their metadata change
     points = report["operating_points"]

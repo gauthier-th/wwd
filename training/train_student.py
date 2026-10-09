@@ -1,6 +1,11 @@
-"""Train the keyword-embedding encoder directly with Sub-center ArcFace (M1 baseline, no teacher).
+"""Train the keyword-embedding encoder with Sub-center ArcFace, optionally distilling a teacher.
 
     uv run --extra training python -m training.train_student --name v0.1 [--steps 80000]
+    uv run --extra training python -m training.train_student --name v1 --teacher models/runs/teacher
+
+With --teacher (M5), the student also learns the teacher's embedding of each clip: the
+teacher saw the clip clean (training.cache_teacher), the student sees it augmented, and a
+cosine loss pulls the two together. The ArcFace class centers start from the teacher's.
 
 Writes models/runs/<name>/: last.pt (resumable), best.pt (best few-shot recall), log.jsonl.
 """
@@ -11,6 +16,7 @@ import argparse
 import json
 import math
 import time
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 
@@ -43,6 +49,55 @@ def lr_at(step: int, total: int, peak: float, warmup: int) -> float:
     return peak * 0.5 * (1 + math.cos(math.pi * (step - warmup) / max(1, total - warmup)))
 
 
+def load_manifests(langs: str | None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """(train clips, classes, few-shot eval clips). The train index is the row in
+    train.parquet, which is what teacher caches are aligned to."""
+    train = pd.read_parquet(MANIFESTS / "train.parquet")
+    classes = pd.read_parquet(MANIFESTS / "classes.parquet")
+    heldout = pd.read_parquet(MANIFESTS / "heldout.parquet")
+    if langs:
+        keep = langs.split(",")
+        train, heldout = train[train.lang.isin(keep)], heldout[heldout.lang.isin(keep)]
+    eval_frame = evaluate.eval_subset(heldout, clips_per_word=20, words_per_lang=100)
+    print(f"{len(train):,} training clips, {len(classes):,} classes, "
+          f"{len(eval_frame):,} few-shot eval clips")
+    return train, classes, eval_frame
+
+
+def train_loader(train: pd.DataFrame, labels: np.ndarray, batch: int, workers: int,
+                 lang_temperature: float) -> DataLoader:
+    weights = language_weights(train.lang, lang_temperature)
+    share = pd.Series(weights).groupby(train.lang.to_numpy()).sum().round(3).to_dict()
+    print(f"language sampling share: {share}")
+    sampler = WeightedRandomSampler(torch.from_numpy(weights), num_samples=len(train),
+                                    replacement=True)
+    return DataLoader(
+        ClipDataset(train, labels, train=True),
+        batch_size=batch, sampler=sampler, drop_last=True, num_workers=workers,
+        pin_memory=True, persistent_workers=True, prefetch_factor=4, worker_init_fn=seed_worker,
+    )
+
+
+def run_logger(out: Path) -> Callable[[dict], None]:
+    def record(rec: dict) -> None:
+        print(json.dumps(rec), flush=True)
+        with open(out / "log.jsonl", "a") as f:
+            f.write(json.dumps(rec) + "\n")
+
+    return record
+
+
+def fewshot_record(step: int, res: dict) -> dict:
+    return {"step": step, "eval": res["mean"],
+            "per_lang_10shot": {k: round(v["recall@1%FAR_10shot"], 4)
+                                for k, v in res.items() if k != "mean"}}
+
+
+def save_atomic(state: dict, path: Path) -> None:
+    torch.save(state, path.with_suffix(".tmp"))
+    path.with_suffix(".tmp").replace(path)
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     p.add_argument("--name", required=True)
@@ -62,6 +117,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--noise-hours", type=float, default=3.0)
     p.add_argument("--lang-temperature", type=float, default=0.5,
                    help="language sampling share ~ clips**t (1 = natural, 0 = balanced)")
+    p.add_argument("--teacher", type=Path, default=None,
+                   help="teacher run directory with best.pt and train_emb.f16 (M5 distillation)")
+    p.add_argument("--distill-weight", type=float, default=10.0,
+                   help="weight of the cosine loss to the teacher's embedding")
+    p.add_argument("--arcface-from-teacher", action=argparse.BooleanOptionalAction, default=True,
+                   help="start the ArcFace class centers from the teacher's")
     p.add_argument("--eval-every", type=int, default=4000)
     p.add_argument("--log-every", type=int, default=100)
     p.add_argument("--langs", default=None, help="restrict to these languages (debugging)")
@@ -74,20 +135,25 @@ def main(argv: list[str] | None = None) -> None:
     out = MODELS / "runs" / args.name
     out.mkdir(parents=True, exist_ok=True)
 
-    train = pd.read_parquet(MANIFESTS / "train.parquet")
-    classes = pd.read_parquet(MANIFESTS / "classes.parquet")
-    heldout = pd.read_parquet(MANIFESTS / "heldout.parquet")
-    if args.langs:
-        keep = args.langs.split(",")
-        train, heldout = train[train.lang.isin(keep)], heldout[heldout.lang.isin(keep)]
-    eval_frame = evaluate.eval_subset(heldout, clips_per_word=20, words_per_lang=100)
-    print(f"{len(train):,} training clips, {len(classes):,} classes, "
-          f"{len(eval_frame):,} few-shot eval clips")
-
+    train, classes, eval_frame = load_manifests(args.langs)
     config = EncoderConfig(width=args.width, embedding_dim=args.embedding_dim)
     encoder = Encoder(config).to(device)
     arcface = SubCenterArcFace(args.embedding_dim, len(classes), k=args.subcenters,
                                scale=args.scale, margin=args.margin).to(device)
+
+    # Distillation: the loader yields row positions; class ids and teacher embeddings are
+    # looked up per batch.
+    teacher_emb, class_of = None, None
+    labels = train.class_id.to_numpy()
+    if args.teacher is not None:
+        from training.cache_teacher import load_cache
+
+        cache = load_cache(args.teacher)
+        teacher_emb = torch.from_numpy(np.ascontiguousarray(cache[train.index.to_numpy()]))
+        class_of = torch.from_numpy(train.class_id.to_numpy().astype(np.int64))
+        labels = np.arange(len(train))
+        print(f"distilling {args.teacher} ({teacher_emb.shape[1]}-dim, weight {args.distill_weight})")
+
     params = list(encoder.parameters()) + list(arcface.parameters())
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay, fused=True)
     augment = build_augmenter(device, args.noise_hours)
@@ -100,36 +166,28 @@ def main(argv: list[str] | None = None) -> None:
         opt.load_state_dict(ckpt["optimizer"])
         step, best = ckpt["step"], ckpt["best"]
         print(f"resumed at step {step}")
+    elif args.teacher is not None and args.arcface_from_teacher:
+        teacher_ckpt = torch.load(args.teacher / "best.pt", map_location="cpu", weights_only=False)
+        with torch.no_grad():
+            arcface.weight.copy_(teacher_ckpt["arcface"]["weight"])
+        print("ArcFace class centers initialized from the teacher")
     print(f"encoder {sum(p.numel() for p in encoder.parameters()) / 1e3:.0f}k params, "
           f"arcface head {arcface.weight.numel() / 1e6:.1f}M")
 
-    weights = language_weights(train.lang, args.lang_temperature)
-    share = pd.Series(weights).groupby(train.lang.to_numpy()).sum().round(3).to_dict()
-    print(f"language sampling share: {share}")
-    sampler = WeightedRandomSampler(torch.from_numpy(weights), num_samples=len(train),
-                                    replacement=True)
-    loader = DataLoader(
-        ClipDataset(train, train.class_id.to_numpy(), train=True),
-        batch_size=args.batch, sampler=sampler, drop_last=True, num_workers=args.workers,
-        pin_memory=True, persistent_workers=True, prefetch_factor=4, worker_init_fn=seed_worker,
-    )
+    loader = train_loader(train, labels, args.batch, args.workers, args.lang_temperature)
 
     def save(path: Path) -> None:
-        torch.save({
-            "step": step, "best": best, "args": vars(args),
+        save_atomic({
+            "step": step, "best": best, "args": {k: str(v) if isinstance(v, Path) else v
+                                                 for k, v in vars(args).items()},
             "encoder_config": asdict(config),
             "encoder": encoder.state_dict(), "arcface": arcface.state_dict(),
             "optimizer": opt.state_dict(),
-        }, path.with_suffix(".tmp"))
-        path.with_suffix(".tmp").replace(path)
+        }, path)
 
-    def record(rec: dict) -> None:
-        print(json.dumps(rec), flush=True)
-        with open(out / "log.jsonl", "a") as f:
-            f.write(json.dumps(rec) + "\n")
-
+    record = run_logger(out)
     encoder.train()
-    t0, seen, run_loss, run_acc = time.time(), 0, 0.0, 0.0
+    t0, seen, run_loss, run_acc, run_distill = time.time(), 0, 0.0, 0.0, 0.0
     while step < args.steps:
         for x, y in loader:
             if step >= args.steps:
@@ -139,10 +197,18 @@ def main(argv: list[str] | None = None) -> None:
             if args.margin_warmup:
                 arcface.set_margin(args.margin * min(1.0, step / args.margin_warmup))
             x = augment(x.to(device, non_blocking=True))
+            target = None
+            if teacher_emb is not None:
+                target = teacher_emb[y].to(device, non_blocking=True).float()
+                y = class_of[y]
             y = y.to(device, non_blocking=True)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 emb = encoder(x)
             loss, cos = arcface(emb.float(), y)
+            if target is not None:
+                distill = 1 - torch.nn.functional.cosine_similarity(emb.float(), target).mean()
+                loss = loss + args.distill_weight * distill
+                run_distill += distill.item()
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(params, 5.0)
@@ -157,17 +223,16 @@ def main(argv: list[str] | None = None) -> None:
                 rec = {"step": step, "loss": run_loss / args.log_every,
                        "train_acc": run_acc / args.log_every, "lr": opt.param_groups[0]["lr"],
                        "margin": round(arcface.margin, 4), "clips_per_s": round(rate)}
+                if teacher_emb is not None:
+                    rec["distill"] = run_distill / args.log_every
                 record(rec)
-                t0, seen, run_loss, run_acc = time.time(), 0, 0.0, 0.0
+                t0, seen, run_loss, run_acc, run_distill = time.time(), 0, 0.0, 0.0, 0.0
 
             if step % args.eval_every == 0 or step == args.steps:
                 emb_eval = evaluate.embed(encoder, eval_frame, workers=args.workers)
                 res = evaluate.fewshot(emb_eval, eval_frame, episodes=200)
                 score = res["mean"]["recall@1%FAR_10shot"]
-                rec = {"step": step, "eval": res["mean"],
-                       "per_lang_10shot": {k: round(v["recall@1%FAR_10shot"], 4)
-                                           for k, v in res.items() if k != "mean"}}
-                record(rec)
+                record(fewshot_record(step, res))
                 if score > best:
                     best = score
                     save(out / "best.pt")

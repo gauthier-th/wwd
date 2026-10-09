@@ -24,6 +24,19 @@ Base models are read from `models/base/<version>/` (`WWD_MODELS`, `WWD_BASE_VERS
 database and recordings go to `data/server/` (`WWD_SERVER_DATA`). `scripts/m2_smoke.sh [lang]`
 drives a whole run with curl against a real base model and checks the bundle in both runtimes.
 
+## Base models
+
+Built offline on a GPU by `training/` (PLAN.md §7). The newest is the server's default; each
+training keeps the base it was made with.
+
+```sh
+scripts/m1_pipeline.sh v0.1   # data download, splits, student-only base model, evaluations
+scripts/m5_pipeline.sh v1     # XLS-R teacher, its embedding cache, distilled student, evaluations
+```
+
+Both run for hours and resume where they stopped: start them detached, e.g.
+`setsid nohup scripts/m5_pipeline.sh v1 >> data/m5.log 2>&1 < /dev/null &`.
+
 ## Web app
 
 ```sh

@@ -39,10 +39,20 @@ These wake-word models were built on base model `{version}`, trained with the da
   **LibriSpeech** (test-clean, test-other; OpenSLR 12), CC-BY 4.0: long-form speech used to
   calibrate and verify the false-accept rate.
 
-## Software
+{teacher}## Software
 
 - **Silero VAD** v6.2.3 (`vad.onnx`), MIT license: see `LICENSE-silero-vad`.
   <https://github.com/snakers4/silero-vad>
+"""
+
+TEACHER = """\
+## Models
+
+- **XLS-R 300M** (`{model}`, Meta AI), Apache-2.0. The base model's encoder was distilled
+  from it; no XLS-R weights are in these files. Babu et al., "XLS-R: Self-supervised
+  Cross-lingual Speech Representation Learning at Scale", 2021.
+  <https://huggingface.co/{model}>
+
 """
 
 README = """\
@@ -86,6 +96,7 @@ def _texts(metadata: dict[str, dict[str, str]], report: dict, hashes: dict[str, 
     """README.md, ATTRIBUTION.md and model.json for model files with this metadata, whose
     thresholds were calibrated for `target` false accepts per hour."""
     meta = metadata["fp32"]
+    teacher = TEACHER.format(**report["base_teacher"]) if report.get("base_teacher") else ""
     verified = ""
     if target == report["target_fa_per_hour"]:  # verification ran at the trained target only
         fp32 = report["verification"]["fp32"]
@@ -117,7 +128,8 @@ def _texts(metadata: dict[str, dict[str, str]], report: dict, hashes: dict[str, 
     }
     return {
         "README.md": readme.encode(),
-        "ATTRIBUTION.md": ATTRIBUTION.format(version=meta["base_model_version"]).encode(),
+        "ATTRIBUTION.md": ATTRIBUTION.format(version=meta["base_model_version"], teacher=teacher)
+        .encode(),
         "model.json": (json.dumps(model_json, indent=2, ensure_ascii=False) + "\n").encode(),
     }
 

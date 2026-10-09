@@ -1,6 +1,6 @@
 # Few-shot wake-word trainer: plan
 
-Last updated: 2026-10-08 (M4 done: Raspberry Pi 4 and Android measured, shortened field test)
+Last updated: 2026-10-09 (M5 done: base v1, distilled from an XLS-R teacher, beats v0.1 end to end)
 
 ## 1. Goal and scope
 
@@ -40,7 +40,7 @@ A user records a few examples of a wake word in the browser. The server fine-tun
 | 5 | **HTTPS for testing on a phone over the LAN** (M3's real-device check, M4): mkcert with its CA trusted on the phone, or a tunnel such as `cloudflared tunnel --url http://localhost:8000`. The server serves the app and the API on one origin, so one tunnel is enough. | Needs your devices. Browsers only allow mic access on HTTPS or localhost. |
 | 6 | ✅ **Hardware for M4**: a Raspberry Pi 4B and an Android phone (Chrome). For the phone, `adb reverse tcp:8000 tcp:8000` avoids HTTPS. | |
 | 7a | *(optional)* `sudo apt install qemu-user-static`, so `scripts/test_aarch64.sh` can run the runtime on emulated aarch64 before a Pi | Installs a system package |
-| 7 | *(M5 only)* Decide whether to rent a larger GPU for the teacher model | Cost decision. See §7. |
+| 7 | ✅ *(M5)* No larger GPU needed: the frozen XLS-R teacher trained on the RTX 4060 Ti in about 4 h (§7, §12.5) | |
 
 ## 3. Dual-runtime rule (wasm + Python)
 
@@ -263,10 +263,14 @@ Every step runs as `python -m training.<step>`, configured with CLI flags. `scri
    - **Run:** batch 256, 80k steps (about 2.8 epochs), AdamW (fused), learning rate 2e-3 with cosine decay, bf16 autocast. The frontend always runs in fp32, because PCEN divides energies as small as 1e-9.
    - **Throughput:** about 1,400 clips/s, about 4 h. The 4060 Ti is memory-bandwidth-bound (288 GB/s): BatchNorm and depthwise convs dominate the backbone, and the 85k-class head adds about 57 ms per step. Partial-FC is the next lever if retraining speed matters.
    - **Early convergence is slow with 85k classes.** 10-shot recall@1%FAR was 8% at step 4k and 24% at step 8k.
-4. **`train_teacher` + `distill` (M5).**
-   - **Teacher:** XLS-R 300M with a weighted sum of layers, attentive pooling and Sub-center ArcFace.
-   - **Distillation:** the student learns from the teacher's embeddings with a cosine loss plus ArcFace.
-   - **On the RTX 4060 Ti:** keep the XLS-R encoder **frozen**, so it only runs forward passes in bf16, and train only the head. Fully fine-tuning XLS-R would take much longer, which is the reason to consider renting a larger GPU.
+4. **`train_teacher`, `cache_teacher`, `train_student --teacher` (M5).** `scripts/m5_pipeline.sh` chains them with the export and the evaluations.
+   - **Teacher (`training/teacher.py`):** XLS-R 300M (pinned revision, `transformers`, training extra only), **frozen**, bf16, `torch.compile`d. It runs only its first **18 of 24 layers**: a probe of each layer alone (`train_teacher --probe`) peaks at layers 12–17 and falls off above 18.
+     - **Head (5.1M parameters):** a softmax-weighted mix of the 19 layer-normalized states, a 1024 → 512 projection, 2 pre-norm transformer layers, attentive pooling, and a 256-dim embedding.
+     - **Training:** Sub-center ArcFace on the student's clips, sampling and augmentation. 28k steps of 256 (about one epoch) at 469 clips/s, about 4.2 h.
+     - **Class centers start from data:** each one is the mean teacher embedding of 2 clips of its word. With random centers the first attempt collapsed: few-shot recall fell from 31% (untrained head) to 5.5% after 4k steps, with training accuracy near 0. With data-initialized centers it reached 97.4% (10-shot) after 1,500 steps.
+   - **Cache (`cache_teacher`):** the teacher's embedding of every training clip, clean and centered: 7.3M × 256 float16 (3.75 GB), about 3.9 h at 520 clips/s, resumable.
+   - **Distillation (`train_student --teacher`):** the same student and recipe as v0.1. Its loss is ArcFace plus 10 × (1 − cosine) to the teacher's clean embedding of the clip the student sees augmented. The student's ArcFace class centers start from the teacher's.
+   - **Why frozen:** on the RTX 4060 Ti, fully fine-tuning XLS-R would take far longer; that was the reason to consider renting a larger GPU.
 5. **`evaluate`** (few-shot). For held-out words, average K = 1/5/10 enrollment clips into a prototype. Score other clips of the word against clips of other held-out words in the same language, and report recall at 1% false alarms plus the EER, per language. EdgeSpot's 82.0% at 10-shot was measured on English MSWC only, so it's a sanity reference, not a target.
 6. **`eval_e2e`.** This is the number that matters.
    - **Enrollment:** for each held-out word, 10 clips from as few speakers as possible. MSWC rarely has 10 clips of one word from one speaker.
@@ -475,7 +479,7 @@ Target: under 2 minutes on CPU. No GPU on the server.
 | **M2** ✅ | `server`: uploads + checks, jobs, quick mode, calibration, compose, verify, SSE | **Done 2026-10-07.** `scripts/m2_smoke.sh` drives the API with curl against v0.1: a French held-out word, a 10-utterance take, 54 s of training on the CPU, 0 false accepts in 1.4 h of held-out audio, and 48/50 (fp32) and 47/50 (int8) other speakers' utterances detected. Python and wasm runtimes fire identically on the bundle. On 24 held-out words, the shipped fp32 file reaches 80.9% recall at 0.36 false accepts/h out of sample (PyTorch: 79.7%); int8 reaches 78.9% at 0.38/h. See §12.2. |
 | **M3** ✅ | `web`: record → review → train → live test → download | **Done 2026-10-07, on emulated devices.** The full flow passes in Chromium, Firefox and WebKit (iPhone 15 emulation), in the browser end-to-end tests against a real API. With the real v0.1 model in Chromium, the live test detected 19 of 20 other speakers saying the word. Still to do on your side: a real iPhone over HTTPS (§2, item 5). See §12.3. |
 | **M4** ✅ | Devices: Pi 4/5 (Python ORT on aarch64), phone browser (wasm) | CPU %, latency and a 24 h real-room false-accept test (TV + speech) measured on each. **Done 2026-10-08, with a shortened field test (your call).** It runs on a Raspberry Pi 4B and in Chrome on Android. On the Pi 4: 40 ms per tick, 36–42% of one core. No false accepts in about 1 h on the Pi, 1 h on the phone and 3 h on a computer, for models calibrated to 0.25/h. The 24 h runs and the phone benchmark weren't done; the tooling is ready for them. See §12.4. |
-| **M5** | Base **v1**: XLS-R teacher + distillation | End-to-end metrics beat v0.1. Older user models keep their base version. |
+| **M5** ✅ | Base **v1**: XLS-R teacher + distillation | End-to-end metrics beat v0.1. Older user models keep their base version. **Done 2026-10-09.** End to end **82.4% recall at the 0.5 false accepts/h target** (v0.1: 77.0%), +4.6 points at the same measured rate. The shipped fp32 file: 85.2% (v0.1: 80.9%). Few-shot (10 clips) 96.7% (v0.1: 95.1%). Same student, so the same cost on every device. New trainings use v1; existing ones keep v0.1. See §12.5. |
 | **M6** | Quality mode, multi-speaker enrollment, auth, S3, retention policy | — |
 
 M2 and M3 can start right after M0, against the stub encoder, while M1 trains.
@@ -625,6 +629,74 @@ The base model is BC-ResNet (204k parameters, 256-dim embedding), trained for 80
 - **Peak memory** of the Python runtime: 82 MB.
 - **The logger, checked by replay:** the M2 test recording (50 utterances) through `runtime.listen --input --log` gives 48 triggers with clips. `fieldreport`'s replay at the run's threshold reproduces those 48 exactly.
 
+### 12.5 M5 results (base model v1)
+
+`scripts/m5_pipeline.sh v1` ran the teacher, its cache, the distilled student, the export and every evaluation unattended. That's about 12.5 h of GPU time on the RTX 4060 Ti, plus about 1 h lost to the first teacher attempt. The result lives in `models/base/v1/`, and `base_model.json` holds every number below. v1's student is the same BC-ResNet as v0.1 (204k parameters), so runtime cost, file size and the ONNX contract don't change.
+
+**Teacher** (`models/runs/teacher`): frozen XLS-R, 18 layers, 28k steps, 4.1 h.
+- **Learned layer mix:** it settled on layers 18, 17 and 9.
+- **The first attempt collapsed** with random ArcFace class centers (§7 step 4). Starting each center from 2 clips of its word fixed it: 97.4% at step 1,500, 98.4% at 4k, then a plateau from about 12k.
+
+**Few-shot on held-out words** (`training.evaluate`, 300 words × 40 clips per language, recall at 1% false alarms):
+
+| | 1 clip | 5 clips | 10 clips | EER, 10 clips |
+|---|---|---|---|---|
+| v0.1 | 82.4% | 93.9% | 95.1% | 1.88% |
+| **v1** | **86.2%** | **95.8%** | **96.7%** | **1.41%** |
+| Teacher (doesn't ship) | 95.3% | 98.5% | 98.7% | 0.74% |
+
+- **Per language, 10 clips:** every language improves, by 0.4 (ru) to 3.5 points (rw: 82.5 → 86.0).
+- **How much of the teacher v1 captured:** about 30% of its 1-clip lead and 45% of its 10-clip lead. The student ended at a mean cosine of 0.71 to the teacher's embeddings.
+- **Training speed:** distillation made the student converge an order of magnitude faster. It had 95.1% at step 8k (on the in-training subset), where v0.1 had 23.9%; v0.1 needed about 50k steps to get there.
+
+**End to end** (`training.eval_e2e`): the same 240 held-out words and protocol as §12.1.
+
+| Target false accepts/h | 0.5 | 1 | 2 |
+|---|---|---|---|
+| v0.1 recall (false accepts/h measured out of sample) | 77.0% (0.60) | 81.7% (1.14) | 85.4% (2.28) |
+| **v1 recall** | **82.4%** (0.69) | **85.4%** (1.27) | **88.0%** (2.43) |
+
+- **At the same measured false-accept rate,** v1 gains **4.6 points**: v0.1 interpolates to 77.7% at 0.69/h. v1 at 0.69/h even beats v0.1 at 1.14/h.
+- **v1's calibration undershoots a little more:** 232 false accepts against 203 over the same 338 word-hours (37% over target, against 20%). That's within noise (about 1.4σ), and calibration on the cache is identical (0.487/h for both).
+- **Per word:** 155 words better, 30 worse, 55 equal. The median goes from 84% to 89%. Words reaching 80% go from 59% to 70%; words below 50% go from 12% to 7%.
+- **Per language, at 0.5/h:**
+
+  | Language | ca | cy | de | en | es | eu | fa | fr | it | pl | ru | rw |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | v0.1 | 86 | 79 | 91 | 68 | 72 | 85 | 72 | 74 | 81 | 85 | 87 | 46 |
+  | **v1** | **92** | **85** | **94** | **74** | **79** | **91** | **78** | **82** | **87** | **90** | **92** | 44 |
+
+- **Kinyarwanda didn't move** (46% → 44%), even though its few-shot recall improved (82.5% → 86.0%). Why isn't measured yet (§12.5, next levers).
+- **Short words gain the most:** words of 4 characters or fewer go from 50% to **59%**. Words of 5–6 characters go 73% → 79%, 7–8 go 83% → 88%, and 9 or more go 87% → 90%.
+- **Enrollment speakers:** with at most 3 speakers 71% → 76%, with 7–10 speakers 85% → 91%.
+
+**Shipped files** (`training.eval_shipped`): 24 words, the server's quick mode, then the Python runtime. Target 0.5/h, gate off.
+
+| | Recall | False accepts/h (in 34 h) |
+|---|---|---|
+| v0.1 `model.onnx` | 80.9% | 0.36 (12) |
+| **v1 `model.onnx`** | **85.2%** | 0.41 (14) |
+| v0.1 `model.int8.onnx` | 78.9% | 0.38 (13) |
+| **v1 `model.int8.onnx`** | **82.9%** | 0.41 (14) |
+
+- **PyTorch reference:** 85.3%, so the shipped fp32 file reproduces it again. The gate costs under 1 point.
+- **int8 still costs about 2 points of recall.** Its worst single-tick shift from fp32 averages 0.15 per word (v0.1: 0.16). One word reached 0.68, which its own threshold absorbs.
+- **In-job recall estimate:** 67% (v0.1: 62%). It's still pessimistic, as §12.2 explains.
+- **Quick mode is as fast as before:** 38 s per word with the encoder on the GPU, 53 s on the CPU.
+
+**Through the server and both runtimes** (`scripts/m2_smoke.sh fr v1`): the same "morceaux" take as M2.
+- **Training:** 9 recordings kept, 52.6 s on the CPU.
+- **Held-out audio:** 0 false accepts in 1.4 h, 9/9 recordings detected.
+- **Python runtime:** 47/50 (fp32) and 45/50 (int8) of other speakers' utterances, with no other events. v0.1 got 48/50 and 47/50, a difference within noise for one word.
+- **wasm runtime:** reproduces the Python runtime (9/9 bundle tests).
+
+**Serving v1:** the server's default base is the newest, so new trainings use v1, while each existing training keeps the base it recorded (§9). Bundles built on v1 credit XLS-R in `ATTRIBUTION.md`, because `base_model.json` records the teacher.
+
+**Next levers (v1.1)**, roughly by expected value:
+1. **Phrase classes** (§12.1, lever 1). Multi-word wake words like "hey jarvis" are still trained as single words.
+2. **Close more of the teacher gap.** The student has captured 30–45% of it. Options: distill on long-form speech windows too (unlabeled, and where false accepts happen), a longer schedule, or a width-40 student if devices can afford the cost (§12.4 has the Pi's headroom).
+3. **Kinyarwanda:** better embeddings didn't help it end to end. Look at its false accepts and its long, agglutinative words.
+
 ## 13. Decisions
 
 **Made:**
@@ -639,7 +711,8 @@ The base model is BC-ResNet (204k parameters, 256-dim embedding), trained for 80
 - **One origin:** the server serves the built app, so phones need one HTTPS tunnel and there's no CORS.
 - **Mobile Safari stand-in in CI:** Playwright WebKit with iPhone emulation. Real devices are checked by hand (M4).
 - **Layout:** flat Python packages (`core/`, `training/`, `server/`, `runtime/`), one uv project.
-- **Teacher:** XLS-R 300M (Apache-2.0), frozen on the local GPU.
+- **Teacher:** XLS-R 300M (Apache-2.0), frozen on the local GPU, first 18 layers, class centers initialized from data (§7 step 4).
+- **Base v1 is the default** for new trainings (§12.5); trainings made on v0.1 keep it.
 - **Default export:** one merged file per wake word.
 - **Quick-mode scorer:** the pushed prototype (§9.3), replacing the MLP head: 77% vs 20% recall at 0.5 FA/h.
 
@@ -654,7 +727,7 @@ The base model is BC-ResNet (204k parameters, 256-dim embedding), trained for 80
 - **The in-job recall estimate is a weak predictor** (correlation 0.41 with measured recall, §12.2). Better: more held-out audio per fold, or a learned predictor from `eval_shipped` runs.
 - **Always-on listening in a phone browser** only works while the page is in the foreground; iOS Safari stops the mic when the screen locks. True background listening needs a native app, and the ONNX contract keeps that possible.
 - **Mismatch between the recording mic and the device mic.** Mitigated by EQ augmentation and by recording on the target device.
-- **Languages with little data** (cy, eu, pl, ru: about 110–140 h each) turned out fine in v0.1 (79–87% end to end). The weak one is **Kinyarwanda (46%)**, despite 422 h: it has only 322 speakers, and its words are long and agglutinative. Short wake words (4 characters or fewer) are weak in every language, at about 50%.
+- **Languages with little data** (cy, eu, pl, ru: about 110–140 h each) turned out fine (v1: 85–92% end to end). The weak one is **Kinyarwanda (44% in v1)**, despite 422 h: it has only 322 speakers, and its words are long and agglutinative. Distillation improved its few-shot recall but not its end-to-end recall (§12.5). Short wake words (4 characters or fewer) are weak in every language: 59% in v1, up from 50%.
 - **Privacy.** Voice recordings are personal data under GDPR. The delete endpoint exists (M2: it removes every file and row, and stops a running job). A retention policy and auth are M6.
 - **Reading paragraphs** (`server/languages.py`) were written without native speakers. The rw, fa, eu and cy texts are flagged `needs_review`.
 

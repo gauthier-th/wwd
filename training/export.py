@@ -40,6 +40,7 @@ from training.augment import build_augmenter, musan_audio, openslr_rirs
 from training.build_bank import BANK, LONGFORM
 from training.evaluate import load_encoder
 from training.paths import MODELS
+from training.teacher import XLSR_REPO, XLSR_REVISION
 
 HOP = 1536
 
@@ -199,6 +200,9 @@ def main(argv: list[str] | None = None) -> None:
         "step": ckpt["step"],
         "train_args": ckpt["args"],
         "encoder_config": asdict(encoder.config),
+        # Distilled from the XLS-R teacher (M5): bundles credit it in ATTRIBUTION.md.
+        "teacher": ({"model": XLSR_REPO, "revision": XLSR_REVISION, "license": "Apache-2.0",
+                     "run": ckpt["args"]["teacher"]} if ckpt["args"].get("teacher") else None),
         "longform_hours": round(cache.hours, 2),
         "bank_clips": len(bank_audio),
         "files": {f: sha256(out / f) for f in files},

@@ -99,6 +99,11 @@ def _eer(pos: np.ndarray, neg: np.ndarray) -> float:
 
 
 def load_encoder(checkpoint: str | Path, device: str = "cuda") -> Encoder:
+    """A student encoder, or the XLS-R teacher from a training.train_teacher checkpoint."""
+    from training.teacher import is_teacher, load_teacher
+
+    if is_teacher(checkpoint):
+        return load_teacher(checkpoint, device)
     return encoder_module.load_encoder(checkpoint, device)
 
 

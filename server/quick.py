@@ -232,6 +232,7 @@ def run(base: BaseModel, job: Job, out: Path, settings: Settings, progress: Prog
         "wake_word": job.wake_word,
         "language": job.language,
         "base_model_version": base.version,
+        "base_teacher": base.manifest.get("teacher"),  # credited in ATTRIBUTION.md
         "mode": "quick",
         "recordings": n,
         "negative_seconds": job.negative_seconds,
