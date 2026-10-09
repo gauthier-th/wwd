@@ -1,5 +1,6 @@
 import { Link, Outlet, useRouteError } from "react-router";
 
+import { MicSettings } from "../components/MicSettings";
 import { useBaseModels } from "../hooks";
 
 export function Layout() {
@@ -9,6 +10,7 @@ export function Layout() {
     <div className="app">
       <header className="topbar">
         <Link to="/" className="brand"><span className="brand-dot" />Wake Word Trainer</Link>
+        <MicSettings />
       </header>
       <Outlet />
       <footer>

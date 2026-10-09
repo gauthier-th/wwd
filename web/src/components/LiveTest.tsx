@@ -1,9 +1,10 @@
 import type { Tick } from "@wwd/runtime";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { artifactUrl, fetchBytes, type OperatingPoint, type Training } from "../api";
 import { createAudioContext, startDetector, startMic, type DetectorHandle, type MicCapture } from "../audio/pipeline";
 import { cssVar } from "../format";
+import { micError } from "./MicSettings";
 
 const HISTORY = 160; // ticks on screen: about 15 s
 
@@ -107,7 +108,7 @@ export function LiveTest({ training, point, kind, gate }: {
 }) {
   const [running, setRunning] = useState(false);
   const [starting, setStarting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ReactNode>(null);
   const [detections, setDetections] = useState(0);
   const [flash, setFlash] = useState(false);
   const [sound, setSound] = useState(true);
@@ -156,7 +157,7 @@ export function LiveTest({ training, point, kind, gate }: {
       detector.current?.terminate();
       detector.current = null;
       void context.close();
-      setError((err as Error).name === "NotAllowedError" ? "Microphone access was refused." : String(err));
+      setError(micError(err) ?? String(err));
     } finally {
       setStarting(false);
     }

@@ -4,7 +4,7 @@
 
 import { decodeWav, encodeWav } from "@wwd/runtime";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router";
 
 import speechUrl from "../../../runtime/testdata/audio/speech.wav?url";
@@ -12,6 +12,7 @@ import { artifactUrl, deviceApi, fetchBytes, fieldClipUrl, type FieldReport, typ
 import type { BenchResult } from "../audio/bench.worker";
 import { createAudioContext, startDetector, startMic, type DetectorHandle, type MicCapture } from "../audio/pipeline";
 import { DetectorSettings, useDetectorChoice } from "../components/DetectorSettings";
+import { micError } from "../components/MicSettings";
 import type { ModelKind } from "../components/LiveTest";
 import { falseAlarmRate, hours } from "../format";
 import { useTraining } from "../hooks";
@@ -269,7 +270,7 @@ function FieldTest({ training, report }: { training: Training; report: Report })
   batteryRef.current = battery;
   const [phase, setPhase] = useState<"idle" | "starting" | "running" | "stopping">("idle");
   const [, setClock] = useState(0); // re-render once a second while running
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ReactNode>(null);
   const [summary, setSummary] = useState<{ id: string; report: FieldReport } | null>(null);
   const runRef = useRef<Run | null>(null);
 
@@ -381,7 +382,7 @@ function FieldTest({ training, report }: { training: Training; report: Report })
       setPhase("running");
     } catch (err) {
       void context.close();
-      setError((err as Error).name === "NotAllowedError" ? "Microphone access was refused." : String(err));
+      setError(micError(err) ?? String(err));
       setPhase("idle");
     }
   }

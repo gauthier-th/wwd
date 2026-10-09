@@ -4,6 +4,7 @@
 import type { DetectorConfig } from "@wwd/runtime";
 
 import workletUrl from "./capture-worklet.js?url";
+import { getMicStream } from "./mic";
 import type { FromRecorder, FromWorker, RecorderStatus, ToRecorder, ToWorker } from "./protocol";
 
 export interface DetectorOptions {
@@ -86,15 +87,7 @@ export async function openMic(
 ): Promise<MicCapture> {
   let stream: MediaStream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        // Raw signal, like a Pi mic hears it: no browser voice processing.
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-      },
-    });
+    stream = await getMicStream(); // the microphone chosen in the top bar, raw signal
   } catch (err) {
     await context.close();
     throw err;

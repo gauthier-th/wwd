@@ -7,6 +7,7 @@ import { api, ApiError, fetchBytes, type Sample, type SampleKind } from "../api"
 import { createAudioContext, startRecording, type Recording } from "../audio/pipeline";
 import type { RecorderStatus } from "../audio/protocol";
 import { REASONS, seconds } from "../format";
+import { micError, MicSettingsLink } from "./MicSettings";
 
 let vadBytes: Promise<ArrayBuffer> | null = null;
 const loadVad = () => (vadBytes ??= fetchBytes(vadUrl));
@@ -42,7 +43,7 @@ export function RecorderCard({ wakeWordId, spec, intro, children }: {
   const client = useQueryClient();
   const [phase, setPhase] = useState<Phase>("idle");
   const [status, setStatus] = useState<RecorderStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ReactNode>(null);
   const [result, setResult] = useState<string | null>(null);
   const recording = useRef<Recording | null>(null);
   const stopping = useRef(false);
@@ -75,9 +76,7 @@ export function RecorderCard({ wakeWordId, spec, intro, children }: {
       setPhase("recording");
     } catch (err) {
       setPhase("idle");
-      const name = (err as Error).name;
-      setError(name === "NotAllowedError" ? "Microphone access was refused. Allow it in the browser and try again."
-        : name === "NotFoundError" ? "No microphone found." : String(err));
+      setError(micError(err) ?? String(err));
     }
   }
 
@@ -90,7 +89,10 @@ export function RecorderCard({ wakeWordId, spec, intro, children }: {
     try {
       const { samples, status: final } = await rec.stop();
       if (spec.kind === "positive" && final.utterances === 0) {
-        throw new Error("No speech detected. Check that the right microphone is selected, then try again.");
+        setError(<>No speech detected. Check that the right microphone is selected (<MicSettingsLink />), then
+          try again.</>);
+        setPhase("idle");
+        return;
       }
       if (spec.minSpeechS && final.speechS < spec.minSpeechS) {
         throw new Error(`Only ${seconds(final.speechS)} of speech detected. Read the text out loud, then try again.`);

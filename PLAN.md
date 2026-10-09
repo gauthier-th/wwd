@@ -414,6 +414,13 @@ Target: under 2 minutes on CPU. No GPU on the server.
 
 **Settings:**
 - `getUserMedia` with `echoCancellation`, `noiseSuppression` and `autoGainControl` all `false`.
+- **Microphone dialog** (top bar, `components/MicSettings.tsx`, `audio/mic.ts`). The button's light shows the permission. The dialog offers:
+  - the permission state, with "Allowed for this visit" when the browser grants without remembering (Firefox's default stays `prompt` in the Permissions API);
+  - which microphone: kept in `localStorage` and used by every capture, falling back to the default if it's gone;
+  - a level test, which also asks for access;
+  - how to reset or remove the permission in this browser (Chrome, Android, Firefox, Safari, iOS), since a page can't do it.
+
+  Microphone errors in the recorder, live test and field test link to the dialog.
 - Uploads are 16-bit WAV files encoded in the browser at 16 kHz. Don't use MediaRecorder: Opus artifacts would hurt the training data.
 - Vite serves the ORT `.wasm` files. In development it proxies `/api` to the server (`WWD_API`); in production the server serves the app.
 

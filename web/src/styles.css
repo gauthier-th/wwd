@@ -396,6 +396,40 @@ input[type="range"] {
   box-shadow: 0 0 0 4px var(--ok-soft);
 }
 
+.light.bad {
+  background: var(--bad);
+  box-shadow: 0 0 0 4px var(--bad-soft);
+}
+
+.dialog {
+  width: min(440px, calc(100vw - 32px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  padding: 16px;
+}
+
+.dialog::backdrop {
+  background: rgb(0 0 0 / 40%);
+}
+
+.dialog summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.link-button {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .recorder {
   display: flex;
   gap: 16px;
