@@ -14,6 +14,8 @@ def make_session(model: str | Path | bytes) -> ort.InferenceSession:
     opts = ort.SessionOptions()
     opts.log_severity_level = 3  # Silero ships unused initializers; silence the warnings
     opts.intra_op_num_threads = 1
+    # x86 without VNNI: the default u8s8 int8 matmul can overflow 16 bits and drift every score
+    opts.add_session_config_entry("session.x64quantprecision", "1")
     src = model if isinstance(model, bytes) else str(model)
     return ort.InferenceSession(src, opts, providers=["CPUExecutionProvider"])
 

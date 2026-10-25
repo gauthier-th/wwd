@@ -314,7 +314,10 @@ def main() -> None:
     calib = all_windows[rng.choice(len(all_windows), 64, replace=False)]
     quantize_int8(models / "model.onnx", models / "model.int8.onnx", calib, output_name="score")
 
-    sess = ort.InferenceSession(str(models / "model.int8.onnx"), providers=["CPUExecutionProvider"])
+    opts = ort.SessionOptions()
+    opts.add_session_config_entry("session.x64quantprecision", "1")  # exact on any x86 (SPEC §4)
+    sess = ort.InferenceSession(str(models / "model.int8.onnx"), opts,
+                                providers=["CPUExecutionProvider"])
     int8 = {n: sess.run(None, {"audio": w})[0].astype(np.float64) for n, w in windows.items()}
 
     q_err = max(np.abs(fp32[n] - int8[n]).max() for n in windows)

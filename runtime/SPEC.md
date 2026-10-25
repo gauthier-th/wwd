@@ -68,7 +68,7 @@ Runtimes ignore unknown keys. Callers may override any detector setting.
 | int8 `score` | 2e-2 | Mean ≤ 1e-3 |
 | Gate decisions, event ticks | Identical | |
 
-- **int8 tolerance.** int8 kernels differ between platforms (wasm SIMD, x86 VNNI, ARM dot-product). A rare one-step requantization difference moves one score by about 1e-2. Golden scores sit at least 0.025 from the threshold, so this can't flip an event.
+- **int8 tolerance.** int8 kernels differ between platforms (wasm SIMD, x86 VNNI, ARM dot-product). A rare one-step requantization difference moves one score by about 1e-2. Golden scores sit at least 0.025 from the threshold, so this can't flip an event. On x86 CPUs without VNNI, onnxruntime's default uint8 × int8 kernel can overflow and shift every score by up to about 0.08: set the session option `session.x64quantprecision` to `1`.
 - **Golden values** come from independent oracles: the official Silero wrapper, PyTorch, and a plain-loop reference implementation of §3. They never come from the runtimes under test. To regenerate them, run `uv run --extra training python -m scripts.make_golden`.
 
 ## 5. Several wake words
