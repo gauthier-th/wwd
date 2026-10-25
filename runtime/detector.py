@@ -10,9 +10,9 @@ from pathlib import Path
 
 import numpy as np
 
-from runtime.onnxfile import read_metadata, split_model
-from runtime.spec import VAD_FRAME, DetectorConfig
-from runtime.vad import SileroVad, make_session
+from .onnxfile import read_metadata, split_model
+from .spec import VAD_FRAME, DetectorConfig
+from .vad import SileroVad, make_session
 
 ModelSource = str | Path | bytes
 Overrides = dict[str, float | int | None]

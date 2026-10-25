@@ -8,10 +8,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from runtime import Detector, DetectorConfig, Gate, MultiDetector, SileroVad, Trigger
-from runtime.onnxfile import read_metadata, split_model
-from runtime.vad import make_session
-from runtime.wav import read_wav
+from .. import Detector, DetectorConfig, Gate, MultiDetector, SileroVad, Trigger
+from ..onnxfile import read_metadata, split_model
+from ..vad import make_session
+from ..wav import read_wav
 
 DATA = Path(__file__).resolve().parents[1] / "testdata"
 VAD = Path(__file__).resolve().parents[1] / "assets" / "silero_vad_16k_op15.onnx"
@@ -198,7 +198,7 @@ def test_detector_config_replaces_the_metadata():
 
 
 def test_listen_record_writes_a_16k_take(tmp_path):
-    from runtime.listen import record
+    from ..listen import record
 
     class FakeStream:  # sounddevice.InputStream, delivering a 440 Hz tone
         def __init__(self, **kwargs):

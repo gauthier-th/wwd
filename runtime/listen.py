@@ -29,10 +29,10 @@ from pathlib import Path
 
 import numpy as np
 
-from runtime.detector import MultiDetector
-from runtime.fieldlog import AudioRing, FieldLog, host_info
-from runtime.spec import SAMPLE_RATE
-from runtime.wav import read_wav, write_wav
+from .detector import MultiDetector
+from .fieldlog import AudioRing, FieldLog, host_info
+from .spec import SAMPLE_RATE
+from .wav import read_wav, write_wav
 
 STATS_EVERY_S = 60
 

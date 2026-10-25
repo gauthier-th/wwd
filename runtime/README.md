@@ -89,3 +89,12 @@ real wake words per word:
 
     python -m runtime.fieldreport fieldtest                          # every word, and the total
     python -m runtime.fieldreport fieldtest/1-hey-jarvis --true 4,9  # one word
+
+## In your own project
+
+Copy `runtime/` into your project under any name (`js/` can go): its modules import each other
+relatively. With the folder copied as `wakeword/`:
+
+    from wakeword import Detector
+    python -m wakeword.listen model.onnx --vad vad.onnx
+    python -m pytest -q wakeword/tests

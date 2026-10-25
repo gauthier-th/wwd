@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as ort
 
-from runtime.spec import SAMPLE_RATE, VAD_CONTEXT, VAD_FRAME
+from .spec import SAMPLE_RATE, VAD_CONTEXT, VAD_FRAME
 
 
 def make_session(model: str | Path | bytes) -> ort.InferenceSession:

@@ -8,11 +8,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from runtime import Detector, MultiDetector
-from runtime.fieldlog import AudioRing, load
-from runtime.fieldreport import summarize, trigger_ticks, word_logs
-from runtime.spec import DetectorConfig
-from runtime.wav import read_wav
+from .. import Detector, MultiDetector
+from ..fieldlog import AudioRing, load
+from ..fieldreport import summarize, trigger_ticks, word_logs
+from ..spec import DetectorConfig
+from ..wav import read_wav
 
 RUNTIME = Path(__file__).resolve().parents[1]
 DATA = RUNTIME / "testdata"
@@ -33,7 +33,7 @@ def test_audio_ring_keeps_the_last_seconds_by_absolute_position():
 
 
 def test_trigger_replay_matches_the_runtime_trigger():
-    from runtime.detector import Trigger
+    from ..detector import Trigger
 
     rng = np.random.default_rng(0)
     scores = rng.random(3000) ** 4
@@ -44,7 +44,7 @@ def test_trigger_replay_matches_the_runtime_trigger():
 
 
 def test_listen_replays_a_file_into_a_field_log(tmp_path, capsys):
-    from runtime.listen import main
+    from ..listen import main
 
     out = tmp_path / "run"
     assert main([str(MODEL), "--vad", str(VAD), "--input", str(SPEECH), "--log", str(out)]) == 0
@@ -69,8 +69,8 @@ def test_listen_replays_a_file_into_a_field_log(tmp_path, capsys):
 
 
 def test_listen_logs_each_wake_word_and_reports_them_together(tmp_path, capsys):
-    from runtime.fieldreport import main as report
-    from runtime.listen import main
+    from ..fieldreport import main as report
+    from ..listen import main
 
     out = tmp_path / "run"
     words = [str(w) for w in WORDS]
@@ -99,7 +99,7 @@ def test_listen_logs_each_wake_word_and_reports_them_together(tmp_path, capsys):
 
 
 def test_bench_runs_and_writes_json(tmp_path, capsys):
-    from runtime.bench import main
+    from ..bench import main
 
     out = tmp_path / "bench.json"
     assert main([str(MODEL), "--vad", str(VAD), "--seconds", "4", "--json", str(out)]) == 0
@@ -113,7 +113,7 @@ def test_bench_runs_and_writes_json(tmp_path, capsys):
 
 
 def test_bench_together_with_and_without_a_shared_encoder(tmp_path, capsys):
-    from runtime.bench import main
+    from ..bench import main
 
     out = tmp_path / "bench.json"
     assert main([*map(str, WORDS), "--seconds", "2", "--together", "--json", str(out)]) == 0

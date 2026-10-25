@@ -22,8 +22,8 @@ from pathlib import Path
 
 import numpy as np
 
-from runtime.fieldlog import FieldRun, load
-from runtime.spec import DetectorConfig
+from .fieldlog import FieldRun, load
+from .spec import DetectorConfig
 
 
 def trigger_ticks(scores: np.ndarray, threshold: float, cfg: DetectorConfig) -> list[int]:

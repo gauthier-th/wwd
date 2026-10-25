@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-from runtime.wav import write_wav
+from .wav import write_wav
 
 
 class FieldLog:

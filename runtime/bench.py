@@ -21,11 +21,11 @@ from pathlib import Path
 
 import numpy as np
 
-from runtime.detector import MultiDetector
-from runtime.fieldlog import host_info
-from runtime.spec import SAMPLE_RATE
-from runtime.vad import SileroVad, make_session
-from runtime.wav import read_wav
+from .detector import MultiDetector
+from .fieldlog import host_info
+from .spec import SAMPLE_RATE
+from .vad import SileroVad, make_session
+from .wav import read_wav
 
 DEFAULT_WAV = Path(__file__).parent / "testdata" / "audio" / "speech.wav"
 
