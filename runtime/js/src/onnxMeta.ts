@@ -5,7 +5,7 @@ const METADATA_PROPS = 14; // ModelProto field number
 const KEY = 1;
 const VALUE = 2;
 
-class Reader {
+export class Reader {
   pos = 0;
   constructor(private readonly buf: Uint8Array) {}
 

@@ -131,6 +131,7 @@ The model is stateless on purpose. A model that streams with cached convolution 
 2. **Gate.** The wake model runs only if the maximum VAD probability over the last 1.5 s is at least `vad_threshold`. When the gate is closed, `score` is 0. The gate can be switched off.
 3. **Trigger.** At least `smoothing_k` of the last `smoothing_n` ticks reach `threshold`. After a trigger, no new trigger fires for `refractory_ms`.
 4. **Calibration.** The server calibrates false accepts per hour with the gate **off**. That's the conservative number, since the gate can only remove false accepts. Its effect on recall is measured on the test page and on devices.
+5. **Several wake words** (SPEC.md §5). One detector can listen for several files on one stream. Each word keeps its own settings, gate, trigger and results. Files from the same base model share one encoder pass per tick (§12.7).
 
 ## 5. Architecture and repo layout
 
@@ -455,7 +456,8 @@ Target: under 2 minutes on CPU. No GPU on the server.
 
 - **Python (`runtime/`):**
   - `vad.py` is the Silero wrapper (state + 64-sample context).
-  - `detector.py` implements §4.3.
+  - `detector.py` implements §4.3. `MultiDetector` listens for several wake words; `Detector` is its one-word case.
+  - `onnxfile.py` reads ONNX files without an ONNX library: the metadata, and the split of a wake-word file into encoder and head, so files that share an encoder run it once (§12.7).
   - `listen.py` handles mic capture and prints trigger events. Its modes:
     - `--record` saves a take from the device's own mic, for the app's import;
     - `--log DIR` writes a field-test log;
@@ -466,8 +468,8 @@ Target: under 2 minutes on CPU. No GPU on the server.
     - `events.jsonl`, with a clip of 3 s before and 1 s after each trigger;
     - `stats.jsonl`, once a minute: CPU, busy share, latency, overruns, battery;
     - `ticks.f32`: every tick's score and VAD.
-  - `fieldreport.py` summarizes a log: hours, false accepts per wall hour and per speech hour, CPU, latency, and battery. Its threshold sweep replays the runtime's trigger over the logged scores, so one 24 h run gives the trigger rate at any threshold.
-  - `README.md` is the device guide. `scripts/pack_runtime.sh [bundle.zip]` packs the kit: the runtime, its golden tests and test data, and the bundle (8 MB).
+  - `fieldreport.py` summarizes a log: hours, false accepts per wall hour and per speech hour, CPU, latency, and battery. Its threshold sweep replays the runtime's trigger over the logged scores, so one 24 h run gives the trigger rate at any threshold. With several wake words, `listen --log` keeps one log per word, and the report adds their total.
+  - `README.md` is the device guide. `scripts/pack_runtime.sh [bundle.zip]` packs the kit: the runtime, its golden tests and test data, and the bundle (about 10.5 MB, 2.5 MB of it the two wake-word test files of §12.7).
 - **JS (`runtime/js`):** the same API and the same logic. The web app uses it, and it's published as a pnpm package for other web apps.
 - **Phones:** run in the browser (wasm). Native apps can load the same `.onnx` files with ORT Mobile later; they're outside the test matrix for now.
 
@@ -766,6 +768,49 @@ What the reductions cost, measured with `eval_e2e` on the 240 words (fed back in
 - **Browser storage is best-effort.** Under storage pressure the browser may evict the cache and the recordings. The app doesn't call `navigator.storage.persist()`, because Firefox prompts for it. The downloaded zip is the durable copy.
 - **The quality check runs under Node,** not in a browser. The browser runs differ only in the wasm build's kernels, which `runtime.spec.ts` holds to golden parity.
 
+### 12.7 Several wake words (2026-10-25)
+
+**Goal:** one device listens for two or more wake words at about the cost of one.
+
+**Why it's cheap:** every `model.onnx` is the base encoder followed by a small head, and files trained on the same base model carry a byte-identical encoder.
+- **The encoder** does nearly all the work: about 73.5M multiply-adds per window, including the conv-STFT frontend.
+- **The head** the app trains is one 256 → 1 Gemm: 257 multiply-adds.
+- **So a second wake word** only needs its head run on the same embedding.
+
+**Design: split at load time, not at export.**
+- **No new file format.** Downloads stay one self-contained `model.onnx` per wake word, and models already downloaded combine as they are.
+- **The split** (`runtime/onnxfile.py`, `runtime/js/src/onnxSplit.ts`): when the detector loads several files, it reads each file's protobuf and cuts the graph at the tensor named `embedding`.
+  - It keeps the nodes and initializers each side needs.
+  - It copies every other field as is, so equal encoders give byte-identical encoder parts.
+  - Files with byte-identical encoder parts share one encoder session; each word gets a small head session.
+  - Load-time cost: about 4 ms per file in Python.
+- **Files that can't be split run whole** and still share the VAD:
+  - the golden stub, which has no `embedding` tensor;
+  - an int8 file next to a float32 one;
+  - files from different base models.
+- **Per-word results don't change.** Each word keeps its own gate (own `vad_threshold` and hangover over the shared VAD), trigger and settings. It gets exactly the ticks and events a one-word `Detector` gives, within the §3 tolerances: the split only regroups the same operations.
+  - On composed files, split scores match whole-file scores bit for bit: browser-template files, server fp32 and int8, prototype and MLP heads.
+  - `Detector` is now the one-word case of `MultiDetector`, so there is one streaming loop per language.
+- **Tests:**
+  - `golden.json` → `words`: two files composed like shipped ones on the golden encoder. One has a prototype head; the other has an MLP head with other smoothing, refractory and gate settings. Their scores come from each whole file on onnxruntime, so the oracle never splits. `make_golden --words-only` rebuilds them.
+  - Both runtimes run the two words alongside the unsplittable stub. They check the grouping, per-word ticks and events, event order, sharing switched off, and the per-word and shared settings.
+  - `core/tests/test_split.py`: float32 and int8 server files each share their own encoder, never each other's.
+
+**Measured** (base v1 encoder, browser-template files, one thread, gate off; `bench --together` and the wasm build under Node):
+
+| Machine | 1 word | 2 words, shared | 4 words, shared | 2 words, separate |
+|---|---|---|---|---|
+| Ryzen 7 7700X, Python onnxruntime | 2.09 ms/tick | 2.09 ms | | 3.93 ms |
+| Ryzen 7 7700X, onnxruntime-web wasm (Node 22) | 6.1 ms | 6.2 ms | 6.2 ms | 12.4 ms |
+
+- **The heads cost nothing measurable:** each is one extra `run()` on a [N, 256] tensor.
+- **Raspberry Pi 4B, projected** from §12.4: about 40 ms per tick and 36–42% of a core whatever the number of words, against about 77 ms, roughly 80% of a core, for two separate files. Not measured on the Pi yet: `bench --together` reports it.
+- **False alarms add up.** Each word keeps its own calibrated rate, so the device wakes by mistake at the sum of the rates: two words at 0.25/h give about 0.5/h. `fieldreport` prints that total.
+
+**Open:**
+- **Web app UI.** The app's live test and device test still run one wake word, even though the JS runtime supports several.
+- **Similar wake words.** Two words that sound alike can both fire on one utterance; the runtime reports both events.
+
 ## 13. Decisions
 
 **Made:**
@@ -784,9 +829,9 @@ What the reductions cost, measured with `eval_e2e` on the 240 words (fed back in
 - **Base v1 is the default** for new trainings (§12.5); trainings made on v0.1 keep it.
 - **Default export:** one merged file per wake word.
 - **Quick-mode scorer:** the pushed prototype (§9.3), replacing the MLP head: 77% vs 20% recall at 0.5 FA/h.
+- **Several wake words: split at load, not at export.** The runtime cuts each merged file at `embedding` and runs one encoder for every file that shares it (§12.7). It needs no separate `encoder.onnx` or `head.onnx` download, and any models trained on the same base model combine as they are.
 
 **Still open:**
-- Also export a shared `encoder.onnx` plus a small `head.onnx` per word, for devices that run several wake words?
 - Build a native phone app later?
 
 ## 14. Risks

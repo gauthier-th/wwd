@@ -70,3 +70,27 @@ Runtimes ignore unknown keys. Callers may override any detector setting.
 
 - **int8 tolerance.** int8 kernels differ between platforms (wasm SIMD, x86 VNNI, ARM dot-product). A rare one-step requantization difference moves one score by about 1e-2. Golden scores sit at least 0.025 from the threshold, so this can't flip an event.
 - **Golden values** come from independent oracles: the official Silero wrapper, PyTorch, and a plain-loop reference implementation of §3. They never come from the runtimes under test. To regenerate them, run `uv run --extra training python -m scripts.make_golden`.
+
+## 5. Several wake words
+
+A runtime may listen for several wake words on one stream, one file each. Every word keeps its own settings, gate and trigger, and gets exactly the ticks, scores and events §3 gives for its file alone. The words share work, never results.
+
+- **One stream.** All files must have the same `sample_rate`, `window_samples` and `hop_samples`. The audio history, VAD frames and tick numbers are shared.
+- **One VAD.** It runs once per frame. Each word takes its own `vad_max` and gate from the same probabilities, with its own `vad_hangover_ms` and `vad_threshold`. A word's score is 0 while its own gate is closed.
+- **Events** carry the word's index, in the order the files were given. Within one call they come out by tick, then by word.
+
+**Sharing the encoder (optional).** A wake-word file is an encoder (`audio` → a tensor named `embedding`) followed by a small head (`embedding` → `score`). Files made from the same base model have identical encoders. A runtime may split each file at `embedding`, run one encoder per window for all the files that share it, then each file's head on the embeddings:
+
+- **Encoder part:** the nodes needed to compute `embedding` from the graph's inputs, the initializers they read, and `embedding` as the output.
+- **Head part:** the nodes needed to compute the graph's outputs from `embedding`, the initializers they read, and `embedding` as the input.
+- **Files that run whole:** no node outputs `embedding`; the head also reads `audio` or another encoder tensor; or a node holds a subgraph.
+- **What is shared:** an encoder part, among files whose encoder parts are byte-identical (nodes, initializers, opsets). A float32 file and an int8 file, or files from different base models, run separately.
+- **Results:** a split only regroups the same operations, so they stay within §4's tolerances of the files run whole.
+
+`runtime/onnxfile.py` and `runtime/js/src/onnxSplit.ts` split the protobuf bytes directly, without an ONNX library. Each keeps the fields it doesn't change as they are, so equal encoders stay byte-identical.
+
+**Conformance.** `golden.json` → `words` describes two files composed like shipped ones on the same encoder:
+- `word_a.onnx`: a one-layer prototype head, the kind the app trains;
+- `word_b.onnx`: an MLP head with other smoothing, refractory and gate settings.
+
+Their scores come from each file run whole. Listening for both along with the golden stub, which has no `embedding` and runs whole, each file must match its own golden values within §4's tolerances, with identical gate decisions and events.

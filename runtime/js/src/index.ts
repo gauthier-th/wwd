@@ -1,4 +1,14 @@
-export { Detector, Gate, Trigger, type DetectorOptions, type Tick, type WakeEvent } from "./detector.js";
+export {
+  Detector,
+  Gate,
+  MultiDetector,
+  Trigger,
+  type DetectorOptions,
+  type MultiDetectorOptions,
+  type Tick,
+  type WakeEvent,
+  type Word,
+} from "./detector.js";
 export { readOnnxMetadata } from "./onnxMeta.js";
 export { configureOrt, loadBytes, ort, type ModelSource } from "./ort.js";
 export * from "./spec.js";

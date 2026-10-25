@@ -1,16 +1,19 @@
 """Regenerate runtime/testdata: golden audio, stub models and expected values.
 
     uv run --extra training python -m scripts.make_golden
+    uv run --extra training python -m scripts.make_golden --words-only   # just the "words" part
 
 Expected values come from independent oracles, never from the runtimes under test:
   - VAD: the official `silero-vad` package wrapper;
   - fp32 scores and embeddings: the PyTorch modules;
   - int8 scores: onnxruntime (Python) on the int8 file;
+  - word files' scores: onnxruntime (Python) on each whole file (the runtimes split them);
   - gate and events: the plain-loop reference at the bottom of this file.
 """
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import tarfile
@@ -23,8 +26,8 @@ import onnxruntime as ort
 import torch
 
 from core.encoder import Encoder
-from core.export import export_module, quantize_int8, read_metadata, set_metadata
-from core.model import Head, WakeWordModel
+from core.export import compose_head, export_module, quantize_int8, read_metadata, set_metadata
+from core.model import Head, PrototypeHead, WakeWordModel
 from runtime.spec import FORMAT_VERSION, VAD_CONTEXT, VAD_FRAME, DetectorConfig
 from runtime.wav import read_wav, write_wav
 
@@ -40,6 +43,14 @@ MSWC = "https://huggingface.co/datasets/MLCommons/ml_spoken_words/resolve/main/d
 TOLERANCE = {"vad": 1e-5, "fp32": 1e-4, "int8": 2e-2, "int8_mean": 1e-3, "embedding": 1e-4}
 MARGIN = {"fp32": 0.006, "int8": 0.025}
 MARGIN_VAD = 1e-3
+# Several wake words (runtime/SPEC.md §5): two files composed like shipped ones, on the same
+# encoder.onnx, so a detector listening for both shares it. Their settings differ, so each
+# word's gate and trigger are its own.
+WORDS = {
+    "word_a.onnx": ("golden-a", {}),
+    "word_b.onnx": ("golden-b", {"smoothing_k": 1, "smoothing_n": 2, "refractory_ms": 1000,
+                                 "vad_threshold": 0.6, "vad_hangover_ms": 1000}),
+}
 
 
 # --------------------------------------------------------------------------- audio
@@ -176,25 +187,88 @@ def sensitivity(model: WakeWordModel, windows: np.ndarray) -> tuple[float, float
     return float((rounding - ref).abs().max()), float((noise - ref).abs().max())
 
 
-def pick_threshold(fp32: np.ndarray, int8: np.ndarray) -> float:
+def pick_threshold(fp32: np.ndarray, int8: np.ndarray | None = None) -> float:
     """Threshold leaving 5-40% of ticks above it, as far as possible from every score
     (distance measured in units of each kind's required margin)."""
     candidates = np.linspace(0.05, 0.95, 1801)
     above = np.array([(fp32 >= t).mean() for t in candidates])
-    clearance = np.minimum(
-        np.abs(fp32[None] - candidates[:, None]).min(1) / MARGIN["fp32"],
-        np.abs(int8[None] - candidates[:, None]).min(1) / MARGIN["int8"],
-    )
+    clearance = np.abs(fp32[None] - candidates[:, None]).min(1) / MARGIN["fp32"]
+    if int8 is not None:
+        clearance = np.minimum(clearance, np.abs(int8[None] - candidates[:, None]).min(1) / MARGIN["int8"])
     clearance[(above < 0.05) | (above > 0.40)] = -1
     best = int(np.argmax(clearance))
     assert clearance[best] >= 1, f"no clean threshold (clearance {clearance[best]:.2f})"
     return round(float(candidates[best]), 4)
 
 
+def word_heads(embeddings: np.ndarray) -> list[torch.nn.Module]:
+    """The head the app trains (a prototype: one Gemm) and an MLP, scaled so that their scores
+    spread over (0, 1) on these embeddings."""
+    anchor = embeddings[int(np.argmax(embeddings @ embeddings.mean(0)))]
+    cos = embeddings @ anchor
+    prototype = PrototypeHead(torch.from_numpy(anchor), 20.0, -20.0 * float(np.quantile(cos, 0.8)))
+    torch.manual_seed(SEED)
+    mlp = Head(embeddings.shape[1])
+    with torch.no_grad():
+        logits = mlp(torch.from_numpy(embeddings))
+        out = mlp.net[2]
+        out.weight *= 2.5 / logits.std()
+        out.bias.copy_((out.bias - logits.mean()) * 2.5 / logits.std() - 1.0)
+    return [prototype, mlp]
+
+
+def make_words(audio: dict[str, np.ndarray], windows: dict[str, np.ndarray],
+               vad: dict[str, np.ndarray]) -> dict:
+    models = OUT / "models"
+    encoder = ort.InferenceSession(str(models / "encoder.onnx"), providers=["CPUExecutionProvider"])
+    heads = word_heads(encoder.run(None, {"audio": windows["speech.wav"]})[0])
+    out = {}
+    for (name, (wake_word, settings)), head in zip(WORDS.items(), heads, strict=True):
+        cfg = DetectorConfig().with_overrides(**settings)
+        meta = {"format_version": FORMAT_VERSION, "wake_word": wake_word, "language": "xx",
+                "base_model_version": "stub", "created_at": "1970-01-01T00:00:00Z",
+                "vad_file": VAD_PATH.name}
+        compose_head(models / "encoder.onnx", head, models / name, metadata={**meta, **cfg.to_metadata()})
+        sess = ort.InferenceSession(str(models / name), providers=["CPUExecutionProvider"])
+        scores = {n: sess.run(None, {"audio": w})[0].astype(np.float64) for n, w in windows.items()}
+        cfg = cfg.with_overrides(threshold=pick_threshold(np.concatenate(list(scores.values()))))
+        proto = onnx.load(str(models / name))
+        set_metadata(proto, cfg.to_metadata())
+        onnx.save(proto, str(models / name))
+        entry: dict = {"config": cfg.to_metadata(), "files": {}}
+        for n in audio:
+            vad_max, gate_open = reference_gate(vad[n], cfg)
+            assert np.abs(vad_max - cfg.vad_threshold).min() >= MARGIN_VAD, f"{name}/{n}: VAD too close"
+            entry["files"][n] = {
+                "vad_max": [round(float(v), 7) for v in vad_max],
+                "gate_open": [bool(g) for g in gate_open],
+                "scores": [round(float(v), 7) for v in scores[n]],
+                "events": {"gate": reference_events(np.where(gate_open, scores[n], 0.0), cfg),
+                           "no_gate": reference_events(scores[n], cfg)},
+            }
+            print(f"{name} {n}: gate open {gate_open.mean():.0%}, events {entry['files'][n]['events']}")
+        out[name] = entry
+    return out
+
+
 # --------------------------------------------------------------------------- main
 
 
+def words_only() -> None:
+    """Rebuild the word files and their values on the existing audio, encoder and VAD values."""
+    golden = json.loads((OUT / "golden.json").read_text())
+    audio = {n: read_wav(OUT / "audio" / n)[0] for n in golden["files"]}
+    windows = {n: tick_windows(a, DetectorConfig()) for n, a in audio.items()}
+    vad = {n: np.array(golden["files"][n]["vad"]) for n in audio}
+    golden["words"] = make_words(audio, windows, vad)
+    (OUT / "golden.json").write_text(json.dumps(golden, separators=(",", ":")) + "\n")
+
+
 def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    p.add_argument("--words-only", action="store_true", help="only rebuild the word files (WORDS)")
+    if p.parse_args().words_only:
+        return words_only()
     rng = np.random.default_rng(SEED)
     torch.manual_seed(SEED)
     (OUT / "audio").mkdir(parents=True, exist_ok=True)
@@ -290,6 +364,7 @@ def main() -> None:
         "ticks": [int(i) for i in pick],
         "embeddings": [[round(float(v), 7) for v in row] for row in emb],
     }
+    golden["words"] = make_words(audio, windows, vad)
     (OUT / "golden.json").write_text(json.dumps(golden, separators=(",", ":")) + "\n")
     (OUT / "SOURCES.txt").write_text(
         "speech.wav is built from these MSWC clips (Multilingual Spoken Words Corpus, CC-BY 4.0,\n"

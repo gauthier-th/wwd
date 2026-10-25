@@ -62,7 +62,9 @@ The runtime is in ${REPO}: \`runtime/\` for Python (a Raspberry Pi or any comput
     pip install -r runtime/requirements.txt
     python -m runtime.listen path/to/model.onnx --vad path/to/vad.onnx
 
-Its README shows how to use the detector in your own code.
+To listen for several wake words at once, give the \`model.onnx\` of each. Wake words trained on
+the same base model share most of the work, so each extra one costs almost no CPU. Its README
+shows how to use the detector in your own code.
 `;
 
 async function sha256(data: Uint8Array): Promise<string> {

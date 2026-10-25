@@ -6,16 +6,18 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
-from runtime import Detector
+from runtime import Detector, MultiDetector
 from runtime.fieldlog import AudioRing, load
-from runtime.fieldreport import summarize, trigger_ticks
+from runtime.fieldreport import summarize, trigger_ticks, word_logs
 from runtime.spec import DetectorConfig
 from runtime.wav import read_wav
 
 RUNTIME = Path(__file__).resolve().parents[1]
 DATA = RUNTIME / "testdata"
 MODEL = DATA / "models" / "model.onnx"
+WORDS = [DATA / "models" / "word_a.onnx", DATA / "models" / "word_b.onnx"]  # they share an encoder
 VAD = RUNTIME / "assets" / "silero_vad_16k_op15.onnx"
 SPEECH = DATA / "audio" / "speech.wav"
 
@@ -66,6 +68,36 @@ def test_listen_replays_a_file_into_a_field_log(tmp_path, capsys):
     assert 0 < r["speech_hours"] < r["hours"]
 
 
+def test_listen_logs_each_wake_word_and_reports_them_together(tmp_path, capsys):
+    from runtime.fieldreport import main as report
+    from runtime.listen import main
+
+    out = tmp_path / "run"
+    words = [str(w) for w in WORDS]
+    assert main([*words, "--vad", str(VAD), "--input", str(SPEECH), "--log", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "one encoder pass for all" in printed and "WAKE  'golden-a'" in printed
+    audio = read_wav(SPEECH)[0]
+    expected = MultiDetector(WORDS, VAD).process(audio)
+    logs = word_logs(out)
+    assert [d.name for d in logs] == ["1-golden-a", "2-golden-b"]
+    for k, log in enumerate(logs):
+        run = load(log)
+        assert run.meta["words"] == ["golden-a", "golden-b"] and run.meta["groups"] == [[0, 1]]
+        assert [e["tick"] for e in run.events] == [e.tick for e in expected if e.word == k]
+        assert all((log / e["clip"]).exists() for e in run.events)
+        assert len(run.scores) == len(audio) // 1536 and run.stats[-1]["events"] >= 0
+
+    assert report([str(out)]) == 0
+    assert f"all 2 wake words: {len(expected)} false accepts" in capsys.readouterr().out
+    with pytest.raises(SystemExit):  # true triggers are marked per word
+        report([str(out), "--true", "1"])
+    with pytest.raises(SystemExit):
+        main([*words, "--threshold", "0.5,0.6,0.7"])  # one value, or one per model
+    assert main([*words, "--input", str(SPEECH), "--threshold", "0.99,0.98", "--log", str(tmp_path / "t")]) == 0
+    assert [load(log).meta["config"]["threshold"] for log in word_logs(tmp_path / "t")] == ["0.99", "0.98"]
+
+
 def test_bench_runs_and_writes_json(tmp_path, capsys):
     from runtime.bench import main
 
@@ -78,3 +110,13 @@ def test_bench_runs_and_writes_json(tmp_path, capsys):
         assert run["ticks"] == (4 * 16000) // 1536 and run["cpu_pct"] > 0
         assert run["latency_ms"]["p50"] <= run["latency_ms"]["max"]
     assert r["vad_frame_ms"]["p50"] > 0 and r["host"]["cores"] >= 1
+
+
+def test_bench_together_with_and_without_a_shared_encoder(tmp_path, capsys):
+    from runtime.bench import main
+
+    out = tmp_path / "bench.json"
+    assert main([*map(str, WORDS), "--seconds", "2", "--together", "--json", str(out)]) == 0
+    r = json.loads(out.read_text())
+    assert [e["share_encoder"] for e in r["together"]] == [True, False]
+    assert [e["runs"][0]["groups"] for e in r["together"]] == [[[0, 1]], [[0], [1]]]

@@ -1,20 +1,26 @@
 """Listen on the microphone and print wake-word events, log a field test, or record a take.
 
     python -m runtime.listen model.onnx --vad vad.onnx [--no-gate] [--threshold 0.6] [--show]
+    python -m runtime.listen a/model.onnx b/model.onnx --vad vad.onnx   # several wake words
     python -m runtime.listen model.onnx --vad vad.onnx --log fieldtest/     # 24 h field test
     python -m runtime.listen model.onnx --vad vad.onnx --input rec.wav --log out/  # replay a file
     python -m runtime.listen --record take.wav [--seconds 30]
 
+Several models listen at once on one stream, each with its own settings; models made from the
+same base model share their encoder, so a second wake word costs almost nothing.
+
 --log writes a field-test directory (runtime/fieldlog.py): every trigger with a clip of the audio
 around it, per-minute CPU and latency, and every tick's score; `python -m runtime.fieldreport`
-summarizes it. Recording on the device itself (a Pi and its own microphone) gives the closest
-training data: upload the take with the app's "Import a file instead".
+summarizes it. With several models, each gets its own directory inside, named after its wake
+word. Recording on the device itself (a Pi and its own microphone) gives the closest training
+data: upload the take with the app's "Import a file instead".
 """
 
 from __future__ import annotations
 
 import argparse
 import queue
+import re
 import resource
 import sys
 import time
@@ -23,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-from runtime.detector import Detector
+from runtime.detector import MultiDetector
 from runtime.fieldlog import AudioRing, FieldLog, host_info
 from runtime.spec import SAMPLE_RATE
 from runtime.wav import read_wav, write_wav
@@ -33,10 +39,12 @@ STATS_EVERY_S = 60
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    p.add_argument("model", nargs="?", help="model.onnx from the downloaded bundle")
+    p.add_argument("models", nargs="*", metavar="model",
+                   help="model.onnx from a downloaded bundle; give several to listen for each")
     p.add_argument("--vad", help="Silero VAD ONNX file; enables the speech gate")
     p.add_argument("--no-gate", action="store_true", help="score every tick even without speech")
-    p.add_argument("--threshold", type=float, help="override the calibrated threshold")
+    p.add_argument("--threshold", help="override the calibrated threshold: one value, or one per "
+                                       "model, comma-separated")
     p.add_argument("--device", help="sounddevice input device name or index")
     p.add_argument("--show", action="store_true", help="print every tick score")
     p.add_argument("--log", metavar="DIR", help="write a field-test log to this directory")
@@ -47,8 +55,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--record", metavar="WAV", help="record 16 kHz audio to this file instead")
     p.add_argument("--seconds", type=float, default=30.0, help="length of a --record take")
     args = p.parse_args(argv)
-    if not args.model and not args.record:
+    if not args.models and not args.record:
         p.error("give a model to listen with, or --record FILE")
+    thresholds = [float(t) for t in args.threshold.split(",")] if args.threshold else [None]
+    if len(thresholds) == 1:
+        thresholds *= max(len(args.models), 1)
+    if len(thresholds) != len(args.models) and not args.record:
+        p.error(f"--threshold: one value, or one per model ({len(args.models)})")
 
     device = int(args.device) if args.device and args.device.isdigit() else args.device
     if args.record:
@@ -56,9 +69,10 @@ def main(argv: list[str] | None = None) -> int:
 
         return record(sd, args.record, args.seconds, device)
 
-    det = Detector(args.model, args.vad, gate=not args.no_gate, overrides={"threshold": args.threshold},
-                   record_ticks=bool(args.show or args.log))
-    hop = det.config.hop_samples
+    det = MultiDetector(args.models, args.vad, gate=not args.no_gate,
+                        overrides=[{"threshold": t} for t in thresholds],
+                        record_ticks=bool(args.show or args.log))
+    hop = det.words[0].config.hop_samples
     overruns = [0]
     if args.input:
         source = file_chunks(args.input, hop, args.realtime)
@@ -66,20 +80,34 @@ def main(argv: list[str] | None = None) -> int:
         import sounddevice as sd
 
         source = mic_chunks(sd, hop, device, overruns)
-    log = None
+    several = len(det.words) > 1
+    logs = None
     if args.log:
-        log = FieldLog(args.log, {
-            "model": Path(args.model).name, "metadata": det.metadata, "config": det.config.to_metadata(),
-            "gate": det.gate, "input": args.input or "microphone", "host": host_info(),
-            "clip_before_s": args.clip_before, "clip_after_s": args.clip_after})
-    name = det.metadata.get("wake_word", "?")
-    print(f"listening for '{name}' (threshold {det.config.threshold:.3f}, gate "
-          f"{'on' if det.gate else 'off'}){f'; logging to {args.log}' if log else ''}; Ctrl+C to stop")
+        meta = {"gate": det.gate, "input": args.input or "microphone", "host": host_info(),
+                "clip_before_s": args.clip_before, "clip_after_s": args.clip_after}
+        if several:
+            meta |= {"words": [w.name for w in det.words], "groups": det.groups}
+        logs = [FieldLog(log_dir(args.log, det, word.index), {
+            "model": Path(model).name, "metadata": word.metadata, "config": word.config.to_metadata(), **meta})
+            for word, model in zip(det.words, args.models, strict=True)]
+    names = ", ".join(f"'{w.name}' (threshold {w.config.threshold:.3f})" for w in det.words)
+    passes = "" if not several else "; one encoder pass for all" if len(det.groups) == 1 else (
+        f"; {len(det.groups)} model runs per tick (only models of the same base model share one)")
+    print(f"listening for {names}, gate {'on' if det.gate else 'off'}{passes}"
+          f"{f'; logging to {args.log}' if logs else ''}; Ctrl+C to stop")
     try:
-        run(det, source, log, args, overruns)
+        run(det, source, logs, args, overruns)
     except KeyboardInterrupt:
         pass
     return 0
+
+
+def log_dir(root: str, det: MultiDetector, word: int) -> Path:
+    """The field log of one wake word: `root` itself, or with several, `root/<n>-<wake word>`."""
+    if len(det.words) == 1:
+        return Path(root)
+    slug = re.sub(r"[^\w-]+", "-", det.words[word].name.lower()).strip("-")
+    return Path(root) / f"{word + 1}-{slug or 'word'}"
 
 
 def mic_chunks(sd, hop: int, device, overruns: list[int]) -> Iterator[np.ndarray]:
@@ -134,51 +162,63 @@ class Minute:
         }
 
 
-def run(det: Detector, source: Iterator[np.ndarray], log: FieldLog | None, args, overruns: list[int]) -> None:
-    hop = det.config.hop_samples
+def run(det: MultiDetector, source: Iterator[np.ndarray], logs: list[FieldLog] | None, args,
+        overruns: list[int]) -> None:
+    hop = det.words[0].config.hop_samples
+    several = len(det.words) > 1
     before, after = int(args.clip_before * SAMPLE_RATE), int(args.clip_after * SAMPLE_RATE)
-    ring = AudioRing(args.clip_before + args.clip_after + 1.0) if log else None
-    pending: list[tuple[dict, int]] = []  # triggers waiting for their audio after
-    minute = Minute(overruns[0])
+    ring = AudioRing(args.clip_before + args.clip_after + 1.0) if logs else None
+    pending: list[tuple[int, dict, int]] = []  # (word, record, sample) waiting for their audio after
+    minutes = [Minute(overruns[0]) for _ in det.words]  # one per log: the CPU is the detector's
     pos = stats_from = 0
 
     def flush(final: bool = False) -> None:
-        while pending and (final or pending[0][1] + after <= pos):
-            record, sample = pending.pop(0)
-            log.event(record, ring.slice(sample - before, sample + after))
+        while pending and (final or pending[0][2] + after <= pos):
+            word, record, sample = pending.pop(0)
+            logs[word].event(record, ring.slice(sample - before, sample + after))
 
     try:
         for chunk in source:
             started = time.perf_counter()
             events = det.process(chunk)
-            minute.latency.append(time.perf_counter() - started)
+            took = time.perf_counter() - started
             pos += len(chunk)
-            ticks, det.ticks = det.ticks, []
+            ticks = [w.ticks for w in det.words]
+            for w in det.words:
+                w.ticks = []
             for ev in events:
-                print(f"{time.strftime('%H:%M:%S')}  WAKE  score={ev.score:.3f}", flush=True)
+                name = f"  '{det.words[ev.word].name}'" if several else ""
+                print(f"{time.strftime('%H:%M:%S')}  WAKE{name}  score={ev.score:.3f}", flush=True)
             if args.show:
-                for tick in ticks:
-                    gate = "open" if tick.gate_open else "shut"
-                    print(f"  tick {tick.index:6d} vad={tick.vad_max:.2f} {gate} score={tick.score:.3f}")
-            if log is None:
+                for i in range(len(ticks[0])):
+                    print(f"  tick {ticks[0][i].index:6d}" + " |".join(
+                        f"{f' {w.name}:' if several else ''} vad={t[i].vad_max:.2f} "
+                        f"{'open' if t[i].gate_open else 'shut'} score={t[i].score:.3f}"
+                        for w, t in zip(det.words, ticks, strict=True)))
+            if logs is None:
                 continue
             ring.push(chunk)
-            log.ticks(np.array([t.score for t in ticks]), np.array([t.vad_max for t in ticks]))
-            minute.ticks += len(ticks)
-            minute.gate_open += sum(t.gate_open for t in ticks)
-            minute.events += len(events)
-            pending += [({"time": time.time(), "tick": ev.tick, "sample": ev.sample,
-                          "score": round(ev.score, 5)}, ev.sample) for ev in events]
+            for w, log, minute, word_ticks in zip(det.words, logs, minutes, ticks, strict=True):
+                mine = [ev for ev in events if ev.word == w.index]
+                log.ticks(np.array([t.score for t in word_ticks]), np.array([t.vad_max for t in word_ticks]))
+                minute.latency.append(took)
+                minute.ticks += len(word_ticks)
+                minute.gate_open += sum(t.gate_open for t in word_ticks)
+                minute.events += len(mine)
+                pending += [(w.index, {"time": time.time(), "tick": ev.tick, "sample": ev.sample,
+                                       "score": round(ev.score, 5)}, ev.sample) for ev in mine]
             flush()
             if pos - stats_from >= STATS_EVERY_S * SAMPLE_RATE:
-                log.stats(minute.record(pos / SAMPLE_RATE, overruns[0], hop))
-                minute, stats_from = Minute(overruns[0]), pos
+                for log, minute in zip(logs, minutes, strict=True):
+                    log.stats(minute.record(pos / SAMPLE_RATE, overruns[0], hop))
+                minutes, stats_from = [Minute(overruns[0]) for _ in det.words], pos
     finally:
-        if log is not None:
+        if logs is not None:
             flush(final=True)
-            if minute.ticks:
-                log.stats(minute.record(pos / SAMPLE_RATE, overruns[0], hop))
-            log.close(audio_s=pos / SAMPLE_RATE, ticks=int(pos // hop))
+            for log, minute in zip(logs, minutes, strict=True):
+                if minute.ticks:
+                    log.stats(minute.record(pos / SAMPLE_RATE, overruns[0], hop))
+                log.close(audio_s=pos / SAMPLE_RATE, ticks=int(pos // hop))
 
 
 def record(sd, path: str, seconds: float, device) -> int:

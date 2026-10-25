@@ -67,3 +67,25 @@ between each, then 20 times from about 3 m:
 
     python -m runtime.listen bundle/model.onnx --vad bundle/vad.onnx --log recall-1m   # Ctrl+C after 20
     python -m runtime.fieldreport recall-1m     # triggers / 20 = recall at 1 m
+
+## Several wake words
+
+Give the `model.onnx` of each wake word. Any bundle's `vad.onnx` works: it's the same file in all
+of them.
+
+    python -m runtime.listen jarvis/model.onnx lights/model.onnx --vad jarvis/vad.onnx
+    python -m runtime.bench jarvis/model.onnx lights/model.onnx --vad jarvis/vad.onnx --together
+
+Models trained on the same base model share their encoder, so the detector runs it once per tick
+for all of them. `bench --together` then shows "1 pass" and about the CPU of a single wake word.
+These run side by side instead, each with its own pass:
+
+- models trained on different base models;
+- a `model.int8.onnx` listening alongside a `model.onnx`.
+
+With `--log fieldtest`, each wake word gets its own log inside `fieldtest/`. The report covers
+each word, then all of them together: that's how often the device wakes up by mistake. Mark the
+real wake words per word:
+
+    python -m runtime.fieldreport fieldtest                          # every word, and the total
+    python -m runtime.fieldreport fieldtest/1-hey-jarvis --true 4,9  # one word

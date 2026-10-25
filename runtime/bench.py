@@ -2,11 +2,13 @@
 detector needs in real time, and the real-time factor, with the speech gate on and off.
 
     python -m runtime.bench model.onnx [model.int8.onnx] --vad vad.onnx [--seconds 60] [--json out.json]
+    python -m runtime.bench a/model.onnx b/model.onnx --vad vad.onnx --together  # several wake words
 
 Audio is streamed one tick (1536 samples) at a time, as `runtime.listen` does live: --wav, or by
 default the golden speech file of the runtime tests (speech with pauses), looped. "CPU" is the
 process CPU time over the audio duration, so 100% is one core fully busy in real time; sessions
-are single-threaded, as on a device.
+are single-threaded, as on a device. --together also streams all the files at once, as one
+detector listening for every wake word, with their encoder shared and without sharing it.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-from runtime.detector import Detector
+from runtime.detector import MultiDetector
 from runtime.fieldlog import host_info
 from runtime.spec import SAMPLE_RATE
 from runtime.vad import SileroVad, make_session
@@ -50,9 +52,10 @@ def ms(values: list[float]) -> dict:
             "max": round(float(a.max()), 3), "mean": round(float(a.mean()), 3)}
 
 
-def stream(model: str, vad: str | None, audio: np.ndarray, gate: bool) -> dict:
-    det = Detector(model, vad, gate=gate, record_ticks=True, batch_size=1)
-    hop = det.config.hop_samples
+def stream(models: list[str], vad: str | None, audio: np.ndarray, gate: bool,
+           share_encoder: bool = True) -> dict:
+    det = MultiDetector(models, vad, gate=gate, record_ticks=True, batch_size=1, share_encoder=share_encoder)
+    hop = det.words[0].config.hop_samples
     det.process(audio[: 2 * SAMPLE_RATE])  # warm up the sessions
     det.reset()
     latency, gate_open, events = [], 0, 0
@@ -61,14 +64,15 @@ def stream(model: str, vad: str | None, audio: np.ndarray, gate: bool) -> dict:
         started = time.perf_counter()
         events += len(det.process(audio[i : i + hop]))
         latency.append(time.perf_counter() - started)
-        gate_open += sum(t.gate_open for t in det.ticks)
-        det.ticks.clear()
+        gate_open += sum(any(t) for t in zip(*([t.gate_open for t in w.ticks] for w in det.words)))
+        for w in det.words:
+            w.ticks.clear()
     cpu, wall = time.process_time() - cpu0, time.perf_counter() - wall0
     audio_s = len(latency) * hop / SAMPLE_RATE
     return {"gate": det.gate, "ticks": len(latency), "audio_s": round(audio_s, 2),
             "gate_open": round(gate_open / len(latency), 3), "events": events,
             "latency_ms": ms(latency), "cpu_pct": round(cpu / audio_s * 100, 2),
-            "realtime_factor": round(wall / audio_s, 4)}
+            "realtime_factor": round(wall / audio_s, 4), "groups": det.groups}
 
 
 def model_only(model: str, n: int = 100) -> dict:
@@ -96,6 +100,13 @@ def vad_only(vad: str, audio: np.ndarray, n: int = 300) -> dict:
     return ms(times[10:])
 
 
+def show(r: dict, label: str = "") -> dict:
+    lat = r["latency_ms"]
+    print(f"{label:<22}{'on' if r['gate'] else 'off':<6}{lat['p50']:>7.2f} {lat['p95']:>7.2f} {lat['max']:>8.2f}"
+          f"{'':<9}{r['cpu_pct']:>8.1f}%{'':<10}{r['gate_open']:.0%}")
+    return r
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     p.add_argument("models", nargs="+", help="model.onnx, model.int8.onnx...")
@@ -103,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--wav", type=Path, help="16 kHz WAV to stream (default: the runtime's test speech)")
     p.add_argument("--seconds", type=float, default=60.0, help="audio per run")
     p.add_argument("--json", type=Path, help="also write the results here")
+    p.add_argument("--together", action="store_true",
+                   help="also listen for all the files at once, with and without a shared encoder")
     args = p.parse_args(argv)
 
     audio = load_audio(args.wav, args.seconds)
@@ -120,12 +133,18 @@ def main(argv: list[str] | None = None) -> int:
         w = entry["window_ms"]
         print(f"{entry['file']:<22}{'':<6}one window: {w['p50']:.2f} ms median, {w['p95']:.2f} ms p95")
         for gate in ([True, False] if args.vad else [False]):
-            r = stream(model, args.vad, audio, gate)
-            entry["runs"].append(r)
-            lat = r["latency_ms"]
-            print(f"{'':<22}{'on' if gate else 'off':<6}{lat['p50']:>7.2f} {lat['p95']:>7.2f} {lat['max']:>8.2f}"
-                  f"{'':<9}{r['cpu_pct']:>8.1f}%{'':<10}{r['gate_open']:.0%}")
+            entry["runs"].append(show(stream([model], args.vad, audio, gate)))
         result["models"].append(entry)
+    if args.together:
+        result["together"] = []
+        for share in (True, False):
+            entry = {"share_encoder": share, "runs": []}
+            for gate in ([True, False] if args.vad else [False]):
+                entry["runs"].append(r := stream(args.models, args.vad, audio, gate, share))
+                passes = len(r["groups"])
+                label = f"{len(args.models)} words, {passes} pass{'es' if passes > 1 else ''}"
+                show(r, label if gate == bool(args.vad) else "")
+            result["together"].append(entry)
     result["rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
     print(f"peak memory {result['rss_mb']} MB")
     if args.json:

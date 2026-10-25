@@ -7,12 +7,18 @@ Every trigger counts as a false accept unless its number is listed with --true: 
 clips in fieldtest/clips/ to decide. The threshold sweep replays the runtime's trigger (k-of-n
 smoothing, refractory period) over the logged tick scores, which are 0 while the speech gate was
 closed, so it is exact for the gate setting the run used.
+
+A run with several wake words keeps one log per word inside (fieldtest/1-hey-jarvis/, ...): the
+report covers each, then all of them together, which is how often the device woke up by mistake.
+Mark true triggers per word: `fieldreport fieldtest/1-hey-jarvis --true 2`.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
+from pathlib import Path
 
 import numpy as np
 
@@ -89,6 +95,17 @@ def _battery(stats: list[dict]) -> dict | None:
     return {"start": b0, "end": b1, "per_hour": round((b1 - b0) / max((t1 - t0) / 3600, 1e-9), 3)}
 
 
+def word_logs(root: Path) -> list[Path]:
+    """The log at `root`, or the per-word logs inside it (runtime.listen with several models)."""
+    if (root / "meta.json").exists():
+        return [root]
+
+    def natural(d: Path) -> list:  # 2-... before 10-...
+        return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", d.name)]
+
+    return sorted((d for d in root.iterdir() if (d / "meta.json").exists()), key=natural)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     p.add_argument("log", help="directory written by runtime.listen --log (or the web device test)")
@@ -96,10 +113,35 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true", help="print JSON instead of a summary")
     args = p.parse_args(argv)
     true_events = {int(x) for x in args.true.split(",") if x.strip()}
-    r = summarize(load(args.log), true_events)
-    if args.json:
-        print(json.dumps(r, indent=2, ensure_ascii=False))
+    logs = word_logs(Path(args.log))
+    if not logs:
+        p.error(f"{args.log}: no field log here (meta.json) or in its subdirectories")
+    if len(logs) > 1 and true_events:
+        p.error(f"--true numbers are per wake word: give one word's log, e.g. {logs[0]}")
+    reports = [summarize(load(log), true_events) for log in logs]
+    if len(reports) == 1:
+        if args.json:
+            print(json.dumps(reports[0], indent=2, ensure_ascii=False))
+        else:
+            print_report(reports[0])
         return 0
+    false_accepts = sum(r["false_accepts"] for r in reports)
+    hours = reports[0]["hours"]  # one stream for every word
+    total = {"false_accepts": false_accepts,
+             "false_accepts_per_hour": round(false_accepts / hours, 3) if hours else None}
+    if args.json:
+        print(json.dumps({"words": reports, "all": total}, indent=2, ensure_ascii=False))
+        return 0
+    for log, r in zip(logs, reports, strict=True):
+        print(f"== {log}")
+        print_report(r)
+        print()
+    print(f"all {len(reports)} wake words: {false_accepts} false accepts in {hours:.2f} h = "
+          f"{total['false_accepts_per_hour']} per hour (the device's false wakes)")
+    return 0
+
+
+def print_report(r: dict) -> None:
     host = r["host"] or {}
     print(f"'{r['wake_word']}' ({r['model']}) on {host.get('cpu', '?')} [{host.get('machine', '?')}], "
           f"input {r['input']}, gate {'on' if r['gate'] else 'off'}, threshold {r['threshold']:.4f}")
@@ -122,7 +164,6 @@ def main(argv: list[str] | None = None) -> int:
         when = f"{e['sample'] / 16000:9.1f} s"
         print(f"  #{e['n']:<3d} {when}  score {e['score']:.3f}  {e.get('clip', '')}"
               f"{'' if e['false_accept'] else '  (true)'}")
-    return 0
 
 
 if __name__ == "__main__":

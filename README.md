@@ -61,6 +61,26 @@ const detector = await Detector.create("model.onnx", "vad.onnx"); // URLs or the
 const events = await detector.process(samples); // 16 kHz mono Float32Array, any length
 ```
 
+### Several wake words
+
+One detector can listen for several wake words at once, each with its own settings:
+
+```sh
+python -m runtime.listen hey-jarvis/model.onnx lights-on/model.onnx --vad hey-jarvis/vad.onnx
+```
+
+```python
+from runtime import MultiDetector
+
+detector = MultiDetector(["hey-jarvis/model.onnx", "lights-on/model.onnx"], "vad.onnx")
+for event in detector.process(audio[:, 0]):  # as above
+    print(f"{detector.words[event.word].name}! (score {event.score:.2f})")
+```
+
+In JavaScript, it's `await MultiDetector.create([modelA, modelB], vad)`. Wake words trained on the
+same base model share the speech encoder, which does almost all the work, so each extra wake word
+costs almost no CPU.
+
 To port the detector to another language, follow [runtime/SPEC.md](runtime/SPEC.md).
 
 ## How it works

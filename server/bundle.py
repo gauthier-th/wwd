@@ -76,6 +76,9 @@ Copy the `runtime/` folder of https://github.com/gauthier-th/wwd, then:
     pip install -r runtime/requirements.txt
     python -m runtime.listen model.onnx --vad vad.onnx
 
+To listen for several wake words at once, give the `model.onnx` of each. Wake words trained on
+the same base model share most of the work, so each extra one costs almost no CPU.
+
 ## Browser
 
 `@wwd/runtime` runs the same files on onnxruntime-web (wasm):
